@@ -16,6 +16,24 @@ His portrait rides along inside the binary, so every notification arrives with h
 - **Needs your input** (`Notification`: permission prompt / idle) — the prompt message, Basso sound, so you can tell "done" from "waiting" by ear.
 - **Focus suppression** — no notification when the terminal/IDE hosting the session is already frontmost. (A butler doesn't announce guests you're already talking to.)
 - **Click-to-focus** — clicking the notification activates the right app (requires `terminal-notifier`). For VS Code-family apps (VS Code, Cursor, Antigravity, Windsurf, …) it focuses the exact window that has the session's project folder open, even with multiple windows of the same app.
+- **Notification history** — every announcement is logged; `tachi-noti log` shows what you missed.
+
+## Tachi Bar — the menu bar kennel
+
+`tachi-bar` is an optional, tiny (~2 MB) menu bar companion that watches every live Claude Code session at once:
+
+- Sessions **grouped by repo root** (worktrees get their own groups), each row showing status — 🟢 running / 🟡 waiting for you / ⚪ idle — and how long, with the elapsed time ticking live while the menu is open.
+- The menu bar title is an at-a-glance summary: `🟡1 🟢2` (waiting first — it needs you), or 🐕 when all is calm.
+- **Click a session to jump to its exact IDE window** (same window-precise focus as the notifications).
+- A "Recent notifications" submenu (last 5), a Launch-at-Login toggle, and nothing else.
+
+No daemon, no IPC: the hooks write tiny per-session state files under `~/Library/Application Support/tachi-noti/state/`, and the bar re-reads them every 2 seconds.
+
+```sh
+cargo install --path . --features bar   # installs tachi-noti + tachi-bar
+tachi-bar                               # run it
+tachi-bar install-agent                 # optional: start at login (launchd)
+```
 
 ## Install
 
@@ -57,16 +75,23 @@ attention = "Basso"
 | `tachi-noti hook` | Reads a hook event JSON from stdin and notifies. Used by the hooks; always exits 0 so it can never block Claude Code. |
 | `tachi-noti install [--scope user\|project]` | Safely merges hook entries into settings.json: timestamped backup, append-only (existing hooks untouched), idempotent, atomic write. Aborts rather than touch a file it can't parse. |
 | `tachi-noti uninstall [--scope ...]` | Removes only tachi-noti's hook entries. |
+| `tachi-noti log [-n N]` | Shows the last N notifications (default 20) with relative timestamps. |
 | `tachi-noti test` | Sends a sample notification and prints the active backend. |
-| `tachi-noti doctor` | Prints backend, bundle-id detection, config, install status per scope. |
+| `tachi-noti doctor` | Prints backend, bundle-id detection, config, install status per scope, live sessions, history stats. |
+| `tachi-bar` | Runs the menu bar session monitor (`--features bar` build). |
+| `tachi-bar install-agent` / `uninstall-agent` | Adds/removes a launchd agent so the bar starts at login. |
 
 ## How it works
 
 The installed hooks are:
 
-- `UserPromptSubmit` — records a start timestamp (`~/Library/Caches/tachi-noti/sessions/<session_id>`) for duration tracking; no notification.
-- `Stop` — reads the last assistant message from the transcript JSONL (tail-reads the last 256 KB, skips tool-use-only and subagent lines), computes elapsed time, notifies.
-- `Notification` (matcher `permission_prompt|idle_prompt`) — relays the message.
+- `SessionStart` / `SessionEnd` — create and remove the session's state file (also prunes files older than 48 h).
+- `UserPromptSubmit` — marks the session running and stamps the task start time; no notification.
+- `Stop` — marks it idle, reads the last assistant message from the transcript JSONL (tail-reads the last 256 KB, skips tool-use-only and subagent lines), computes elapsed time, notifies, logs to history.
+- `Notification` (matcher `permission_prompt|idle_prompt`) — marks the session waiting and relays the message.
+- `PostToolUse` — flips waiting back to running once a permission is answered; otherwise just a ≤1-per-minute liveness heartbeat.
+
+Upgrading from v0.1: run `tachi-noti install` again — it appends only the missing hook events (`doctor` will remind you).
 
 Implementation notes:
 
