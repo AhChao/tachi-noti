@@ -31,11 +31,13 @@ dirs = "6"
 objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", optional = true, features = [
     "NSString", "NSDate", "NSTimer", "NSRunLoop", "NSThread", "NSObjCRuntime",
+    "NSAttributedString", "NSArray", "NSDictionary", "NSValue", "NSRange", "NSData", "NSGeometry",
 ] }
 objc2-app-kit = { version = "0.3", optional = true, features = [
     "NSApplication", "NSRunningApplication", "NSResponder",
     "NSStatusBar", "NSStatusItem", "NSStatusBarButton",
     "NSMenu", "NSMenuItem", "NSButton", "NSControl", "NSView", "NSCell",
+    "NSImage", "NSColor", "NSAttributedString", "NSFont",
 ] }
 
 [profile.release]

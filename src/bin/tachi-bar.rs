@@ -122,12 +122,17 @@ mod ui {
     use crate::agent;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
-        NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+        NSApplication, NSApplicationActivationPolicy, NSCellImagePosition, NSColor,
+        NSControlStateValueOff, NSControlStateValueOn, NSFont, NSFontAttributeName,
+        NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuDelegate,
+        NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
     };
-    use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
+    use objc2_foundation::{
+        NSArray, NSMutableAttributedString, NSObject, NSObjectProtocol, NSRange, NSRunLoop,
+        NSRunLoopCommonModes, NSString, NSTimer, ns_string,
+    };
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use tachi_noti::{bar, history, state};
@@ -214,11 +219,41 @@ mod ui {
             unsafe { msg_send![super(this), init] }
         }
 
-        fn set_title(&self, title: &str) {
-            if let Some(item) = self.ivars().status_item.borrow().as_ref() {
-                if let Some(button) = item.button(self.mtm()) {
-                    button.setTitle(&NSString::from_str(title));
+        /// Render "●1 ●2" next to the dog icon, dots tinted per status.
+        fn set_title_segments(&self, segments: &[(usize, state::Status)]) {
+            let Some(item) = self.ivars().status_item.borrow().clone() else { return };
+            let Some(button) = item.button(self.mtm()) else { return };
+
+            let mut plain = String::new();
+            let mut dot_ranges: Vec<(usize, state::Status)> = Vec::new();
+            for (i, (count, status)) in segments.iter().enumerate() {
+                if i > 0 {
+                    plain.push(' ');
                 }
+                dot_ranges.push((plain.encode_utf16().count(), *status));
+                plain.push('\u{25CF}');
+                plain.push_str(&count.to_string());
+            }
+            if !plain.is_empty() {
+                plain.insert(0, ' '); // breathing room after the dog icon
+                for r in &mut dot_ranges {
+                    r.0 += 1;
+                }
+            }
+
+            let attr = NSMutableAttributedString::from_nsstring(&NSString::from_str(&plain));
+            let full = NSRange::new(0, plain.encode_utf16().count());
+            unsafe {
+                attr.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::labelColor(), full);
+                attr.addAttribute_value_range(NSFontAttributeName, &NSFont::menuBarFontOfSize(0.0), full);
+                for (loc, status) in dot_ranges {
+                    attr.addAttribute_value_range(
+                        NSForegroundColorAttributeName,
+                        &status_color(status),
+                        NSRange::new(loc, 1),
+                    );
+                }
+                button.setAttributedTitle(&attr);
             }
         }
 
@@ -227,7 +262,7 @@ mod ui {
             let now = state::now_epoch();
             let states = state::load_all();
             let snap = bar::build_snapshot(states.clone(), now);
-            self.set_title(&bar::title(&snap));
+            self.set_title_segments(&bar::title_segments(&snap));
 
             if !self.ivars().menu_open.get() {
                 return;
@@ -245,7 +280,8 @@ mod ui {
                 let Some(a) = actions.get(idx) else { continue };
                 let Some(s) = by_id.get(&a.session_id) else { continue };
                 let row = bar::build_row(s, &a.group_key, now);
-                item.setTitle(&NSString::from_str(&format!("{} {}", row.glyph, row.label)));
+                item.setTitle(&NSString::from_str(&row.label));
+                item.setImage(status_image(row.status).as_deref());
             }
         }
 
@@ -285,7 +321,8 @@ mod ui {
                 for s in sorted {
                     let row = bar::build_row(s, key, now);
                     let item = NSMenuItem::new(mtm);
-                    item.setTitle(&NSString::from_str(&format!("{} {}", row.glyph, row.label)));
+                    item.setTitle(&NSString::from_str(&row.label));
+                    item.setImage(status_image(row.status).as_deref());
                     if row.enabled {
                         let target: &AnyObject = self;
                         unsafe {
@@ -351,6 +388,48 @@ mod ui {
         }
     }
 
+    fn status_color(status: state::Status) -> objc2::rc::Retained<NSColor> {
+        match status {
+            state::Status::Running => NSColor::systemGreenColor(),
+            state::Status::Waiting => NSColor::systemYellowColor(),
+            state::Status::Idle => NSColor::tertiaryLabelColor(),
+        }
+    }
+
+    /// Small tinted circle.fill for a menu row.
+    fn status_image(status: state::Status) -> Option<Retained<NSImage>> {
+        let img =
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(ns_string!("circle.fill"), None)?;
+        let palette = NSImageSymbolConfiguration::configurationWithPaletteColors(
+            &NSArray::from_retained_slice(&[status_color(status)]),
+        );
+        let size = NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
+            9.0,
+            0.0, // NSFontWeightRegular
+            objc2_app_kit::NSImageSymbolScale::Small,
+        );
+        let combined = size.configurationByApplyingConfiguration(&palette);
+        img.imageWithSymbolConfiguration(&combined)
+    }
+
+    /// Tachi's own silhouette (drawn by Steven), embedded so the binary stays
+    /// self-contained. Template rendering follows the menu bar's appearance.
+    const TACHI_TEMPLATE: &[u8] = include_bytes!("../../assets/tachi-menubar-template.png");
+
+    fn dog_image() -> Option<Retained<NSImage>> {
+        let data = objc2_foundation::NSData::with_bytes(TACHI_TEMPLATE);
+        if let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) {
+            img.setTemplate(true);
+            img.setSize(objc2_foundation::NSSize::new(18.0, 18.0));
+            return Some(img);
+        }
+        // Defensive fallback: the generic system dog.
+        let img =
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(ns_string!("dog.fill"), None)?;
+        img.setTemplate(true);
+        Some(img)
+    }
+
     fn status_rank(status: state::Status) -> u8 {
         match status {
             state::Status::Waiting => 0,
@@ -380,6 +459,10 @@ mod ui {
 
         let status_bar = NSStatusBar::systemStatusBar();
         let item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
+        if let Some(button) = item.button(mtm) {
+            button.setImage(dog_image().as_deref());
+            button.setImagePosition(NSCellImagePosition::ImageLeft);
+        }
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
         menu.setDelegate(Some(ProtocolObject::from_ref(&*controller)));

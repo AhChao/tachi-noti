@@ -25,19 +25,11 @@ pub struct Group {
 }
 
 pub struct Row {
-    pub glyph: &'static str,
+    pub status: Status,
     pub label: String,
     pub bundle_id: Option<String>,
     pub open_path: Option<String>,
     pub enabled: bool,
-}
-
-fn glyph(status: Status) -> &'static str {
-    match status {
-        Status::Running => "\u{1F7E2}", // 🟢
-        Status::Waiting => "\u{1F7E1}", // 🟡
-        Status::Idle => "\u{26AA}",     // ⚪
-    }
 }
 
 fn status_word(status: Status) -> &'static str {
@@ -123,7 +115,7 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
         .filter(|b| notify::vscode_family_bundle(b))
         .map(|_| group_key.to_string());
     Row {
-        glyph: glyph(s.status),
+        status: s.status,
         label,
         bundle_id: s.bundle_id.clone(),
         open_path,
@@ -131,16 +123,21 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
     }
 }
 
-/// Waiting and running dominate the title; idle count only shows when nothing
-/// is active, so the title stays narrow when it matters.
-pub fn title(s: &Snapshot) -> String {
-    match (s.waiting, s.running, s.idle) {
-        (0, 0, 0) => "\u{1F415}".into(), // 🐕
-        (0, 0, i) => format!("\u{26AA}{i}"),
-        (0, r, _) => format!("\u{1F7E2}{r}"),
-        (w, 0, _) => format!("\u{1F7E1}{w}"),
-        (w, r, _) => format!("\u{1F7E1}{w} \u{1F7E2}{r}"),
+/// Title segments next to the dog icon: waiting and running dominate; the idle
+/// count only shows when nothing is active, so the title stays narrow when it
+/// matters. Empty = all quiet, the dog stands alone.
+pub fn title_segments(s: &Snapshot) -> Vec<(usize, Status)> {
+    let mut parts = Vec::new();
+    if s.waiting > 0 {
+        parts.push((s.waiting, Status::Waiting));
     }
+    if s.running > 0 {
+        parts.push((s.running, Status::Running));
+    }
+    if parts.is_empty() && s.idle > 0 {
+        parts.push((s.idle, Status::Idle));
+    }
+    parts
 }
 
 /// Focus the window hosting a session. VS Code-family apps get the folder path
@@ -237,11 +234,15 @@ mod tests {
     #[test]
     fn title_summarizes() {
         let mk = |w, r, i| Snapshot { groups: vec![], running: r, waiting: w, idle: i };
-        assert_eq!(title(&mk(0, 0, 0)), "\u{1F415}");
-        assert_eq!(title(&mk(0, 0, 3)), "\u{26AA}3", "idle-only shows a count");
-        assert_eq!(title(&mk(0, 2, 5)), "\u{1F7E2}2", "idle hidden when active");
-        assert_eq!(title(&mk(1, 0, 0)), "\u{1F7E1}1");
-        assert_eq!(title(&mk(1, 2, 0)), "\u{1F7E1}1 \u{1F7E2}2");
+        assert!(title_segments(&mk(0, 0, 0)).is_empty(), "all quiet: dog stands alone");
+        assert_eq!(title_segments(&mk(0, 0, 3)), vec![(3, Status::Idle)], "idle-only shows a count");
+        assert_eq!(title_segments(&mk(0, 2, 5)), vec![(2, Status::Running)], "idle hidden when active");
+        assert_eq!(title_segments(&mk(1, 0, 0)), vec![(1, Status::Waiting)]);
+        assert_eq!(
+            title_segments(&mk(1, 2, 0)),
+            vec![(1, Status::Waiting), (2, Status::Running)],
+            "waiting leads — it needs the user"
+        );
     }
 
     #[test]
@@ -258,7 +259,7 @@ mod tests {
         assert_eq!(snap.groups[0].rows.len(), 3, "every session gets a row");
         assert_eq!(snap.running, 2);
         assert_eq!(snap.waiting, 1);
-        assert_eq!(title(&snap), "\u{1F7E1}1 \u{1F7E2}2");
+        assert_eq!(title_segments(&snap), vec![(1, Status::Waiting), (2, Status::Running)]);
     }
 
     #[test]
