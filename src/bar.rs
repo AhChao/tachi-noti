@@ -8,10 +8,15 @@ use std::time::Duration;
 /// Sessions silent this long disappear from the menu (died without SessionEnd).
 pub const HIDE_AFTER_SECS: u64 = 12 * 3600;
 
+/// A genuinely running task heartbeats via PostToolUse at least every minute;
+/// a "running" session silent this long was killed mid-task — show it idle.
+pub const RUNNING_STALE_SECS: u64 = 30 * 60;
+
 pub struct Snapshot {
     pub groups: Vec<Group>,
     pub running: usize,
     pub waiting: usize,
+    pub idle: usize,
 }
 
 pub struct Group {
@@ -60,11 +65,20 @@ pub fn build_snapshot(states: Vec<SessionState>, now: u64) -> Snapshot {
     let mut live: Vec<SessionState> = states
         .into_iter()
         .filter(|s| now.saturating_sub(s.last_event_at) <= HIDE_AFTER_SECS)
+        .map(|mut s| {
+            if s.status == Status::Running && now.saturating_sub(s.last_event_at) > RUNNING_STALE_SECS {
+                s.status = Status::Idle;
+                s.status_since = s.last_event_at;
+                s.task_started_at = None;
+            }
+            s
+        })
         .collect();
     live.sort_by_key(|s| std::cmp::Reverse(s.last_event_at));
 
     let running = live.iter().filter(|s| s.status == Status::Running).count();
     let waiting = live.iter().filter(|s| s.status == Status::Waiting).count();
+    let idle = live.iter().filter(|s| s.status == Status::Idle).count();
 
     // Group by repo root (fallback cwd), preserving most-recent-first group order.
     let mut groups: Vec<(String, String, Vec<SessionState>)> = Vec::new(); // (key, header, members)
@@ -89,7 +103,7 @@ pub fn build_snapshot(states: Vec<SessionState>, now: u64) -> Snapshot {
         })
         .collect();
 
-    Snapshot { groups, running, waiting }
+    Snapshot { groups, running, waiting, idle }
 }
 
 pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
@@ -117,12 +131,15 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
     }
 }
 
+/// Waiting and running dominate the title; idle count only shows when nothing
+/// is active, so the title stays narrow when it matters.
 pub fn title(s: &Snapshot) -> String {
-    match (s.waiting, s.running) {
-        (0, 0) => "\u{1F415}".into(), // 🐕
-        (0, r) => format!("\u{1F7E2}{r}"),
-        (w, 0) => format!("\u{1F7E1}{w}"),
-        (w, r) => format!("\u{1F7E1}{w} \u{1F7E2}{r}"),
+    match (s.waiting, s.running, s.idle) {
+        (0, 0, 0) => "\u{1F415}".into(), // 🐕
+        (0, 0, i) => format!("\u{26AA}{i}"),
+        (0, r, _) => format!("\u{1F7E2}{r}"),
+        (w, 0, _) => format!("\u{1F7E1}{w}"),
+        (w, r, _) => format!("\u{1F7E1}{w} \u{1F7E2}{r}"),
     }
 }
 
@@ -219,10 +236,44 @@ mod tests {
 
     #[test]
     fn title_summarizes() {
-        let mk = |w, r| Snapshot { groups: vec![], running: r, waiting: w };
-        assert_eq!(title(&mk(0, 0)), "\u{1F415}");
-        assert_eq!(title(&mk(0, 2)), "\u{1F7E2}2");
-        assert_eq!(title(&mk(1, 0)), "\u{1F7E1}1");
-        assert_eq!(title(&mk(1, 2)), "\u{1F7E1}1 \u{1F7E2}2");
+        let mk = |w, r, i| Snapshot { groups: vec![], running: r, waiting: w, idle: i };
+        assert_eq!(title(&mk(0, 0, 0)), "\u{1F415}");
+        assert_eq!(title(&mk(0, 0, 3)), "\u{26AA}3", "idle-only shows a count");
+        assert_eq!(title(&mk(0, 2, 5)), "\u{1F7E2}2", "idle hidden when active");
+        assert_eq!(title(&mk(1, 0, 0)), "\u{1F7E1}1");
+        assert_eq!(title(&mk(1, 2, 0)), "\u{1F7E1}1 \u{1F7E2}2");
+    }
+
+    #[test]
+    fn multiple_sessions_same_repo_all_counted() {
+        let snap = build_snapshot(
+            vec![
+                session("aaa", "/r/proj", Status::Running, 300),
+                session("bbb", "/r/proj", Status::Running, 200),
+                session("ccc", "/r/proj", Status::Waiting, 100),
+            ],
+            400,
+        );
+        assert_eq!(snap.groups.len(), 1, "one group for the repo");
+        assert_eq!(snap.groups[0].rows.len(), 3, "every session gets a row");
+        assert_eq!(snap.running, 2);
+        assert_eq!(snap.waiting, 1);
+        assert_eq!(title(&snap), "\u{1F7E1}1 \u{1F7E2}2");
+    }
+
+    #[test]
+    fn stale_running_demotes_to_idle() {
+        let now = 100_000;
+        let snap = build_snapshot(
+            vec![
+                session("dead", "/r/p", Status::Running, now - RUNNING_STALE_SECS - 10),
+                session("live", "/r/p", Status::Running, now - 30),
+            ],
+            now,
+        );
+        assert_eq!(snap.running, 1, "killed-mid-task session no longer counts as running");
+        assert_eq!(snap.idle, 1);
+        let labels: Vec<&str> = snap.groups[0].rows.iter().map(|r| r.label.split(' ').next().unwrap()).collect();
+        assert!(labels.contains(&"idle"));
     }
 }
