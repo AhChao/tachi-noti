@@ -1,4 +1,4 @@
-use crate::{config, focus, gitinfo, notify, sessions, settings, transcript};
+use crate::{config, focus, gitinfo, history, notify, settings, state, transcript};
 use notify::Notice;
 use serde::Deserialize;
 use std::io::Read;
@@ -14,6 +14,8 @@ pub struct HookInput {
     pub hook_event_name: Option<String>,
     pub notification_type: Option<String>,
     pub message: Option<String>,
+    pub source: Option<String>,
+    pub reason: Option<String>,
 }
 
 pub fn run() -> Result<()> {
@@ -22,23 +24,65 @@ pub fn run() -> Result<()> {
     let input: HookInput = serde_json::from_str(&raw).unwrap_or_default();
     let Some(event) = input.hook_event_name.as_deref() else { return Ok(()) };
     let cfg = config::load();
+    let ctx = build_ctx(&input);
 
     match event {
-        "UserPromptSubmit" => {
-            if let Some(id) = &input.session_id {
-                sessions::record_start(id);
-            }
-            sessions::cleanup_stale();
+        "SessionStart" => {
+            transition(&ctx, state::Event::SessionStart { source: input.source.as_deref() });
+            state::cleanup_stale();
             Ok(())
         }
-        "Stop" => on_stop(&input, &cfg),
-        "Notification" => on_notification(&input, &cfg),
+        "UserPromptSubmit" => {
+            transition(&ctx, state::Event::PromptSubmit);
+            Ok(())
+        }
+        "Stop" => on_stop(&input, &cfg, &ctx),
+        "Notification" => on_notification(&input, &cfg, &ctx),
+        "PostToolUse" => {
+            transition(&ctx, state::Event::PostToolUse);
+            Ok(())
+        }
+        "SessionEnd" => {
+            state::remove(&ctx.session_id);
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
 
-fn on_stop(input: &HookInput, cfg: &config::Config) -> Result<()> {
-    let duration = input.session_id.as_deref().and_then(sessions::take_start);
+fn build_ctx(input: &HookInput) -> state::Ctx {
+    let cwd = input
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let repo = gitinfo::detect(&cwd);
+    state::Ctx {
+        session_id: input.session_id.clone().unwrap_or_else(|| "unknown".into()),
+        repo_name: repo.name,
+        repo_root: repo.toplevel.map(|p| p.to_string_lossy().into_owned()),
+        branch: repo.branch,
+        bundle_id: focus::session_bundle_id(),
+        cwd: cwd.to_string_lossy().into_owned(),
+    }
+}
+
+fn transition(ctx: &state::Ctx, ev: state::Event) -> state::Transition {
+    let prev = state::load(&ctx.session_id);
+    let age = state::file_age_secs(&ctx.session_id);
+    let t = state::apply_event(prev, ctx, ev, state::now_epoch(), age);
+    if let Some(s) = &t.save {
+        state::save(s);
+    }
+    t
+}
+
+fn on_stop(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<()> {
+    // State first: the transition must happen even if the popup is suppressed.
+    let t = transition(ctx, state::Event::Stop);
+    let duration = t.task_duration;
+
     if cfg.min_duration_secs > 0 {
         // Only suppress when we positively know the turn was quick.
         if let Some(d) = duration {
@@ -58,20 +102,25 @@ fn on_stop(input: &HookInput, cfg: &config::Config) -> Result<()> {
         .map(|t| transcript::squash(&t, cfg.max_body_len))
         .unwrap_or_else(|| "Task complete".to_string());
     if let Some(d) = duration {
-        body = format!("{body} ({})", sessions::format_duration(d));
+        body = format!("{body} ({})", state::format_duration(d));
     }
 
-    let notice = build_notice(input, cfg, body, &cfg.sounds.stop);
-    notify::send(&notify::detect(cfg), &notice)
+    let notice = build_notice(cfg, ctx, body, &cfg.sounds.stop);
+    notify::send(&notify::detect(cfg), &notice)?;
+    record_history("stop", ctx, &notice.body);
+    Ok(())
 }
 
-fn on_notification(input: &HookInput, cfg: &config::Config) -> Result<()> {
+fn on_notification(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<()> {
     // The installed matcher already filters, but stay defensive in case the
     // hook is registered with a broader matcher.
     match input.notification_type.as_deref() {
         Some("permission_prompt") | Some("idle_prompt") | None => {}
         Some(_) => return Ok(()),
     }
+    // State first: suppressing the popup must not suppress the Waiting state.
+    transition(ctx, state::Event::Waiting);
+
     if cfg.focus_suppression && focus::session_is_frontmost() {
         return Ok(());
     }
@@ -82,32 +131,37 @@ fn on_notification(input: &HookInput, cfg: &config::Config) -> Result<()> {
         .unwrap_or_else(|| "Claude needs your input".to_string());
     let body = transcript::squash(&body, cfg.max_body_len);
 
-    let notice = build_notice(input, cfg, body, &cfg.sounds.attention);
-    notify::send(&notify::detect(cfg), &notice)
+    let notice = build_notice(cfg, ctx, body, &cfg.sounds.attention);
+    notify::send(&notify::detect(cfg), &notice)?;
+    record_history("notification", ctx, &notice.body);
+    Ok(())
 }
 
-fn build_notice(input: &HookInput, cfg: &config::Config, body: String, sound: &str) -> Notice {
-    let cwd = input
-        .cwd
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let repo = gitinfo::detect(&cwd);
-    let subtitle = repo
+fn record_history(event: &str, ctx: &state::Ctx, body: &str) {
+    history::append(&history::Entry {
+        ts: state::now_epoch(),
+        event: event.to_string(),
+        repo: ctx.repo_name.clone(),
+        branch: ctx.branch.clone(),
+        body: body.to_string(),
+        session_id: Some(ctx.session_id.clone()),
+    });
+}
+
+fn build_notice(cfg: &config::Config, ctx: &state::Ctx, body: String, sound: &str) -> Notice {
+    let subtitle = ctx
         .branch
         .as_deref()
-        .map(|b| format!("{} @ {b}", repo.name))
+        .map(|b| format!("{} @ {b}", ctx.repo_name))
         .unwrap_or_default();
-    let click_path = repo.toplevel.clone().unwrap_or_else(|| cwd.clone());
     Notice {
-        title: repo.name.clone(),
+        title: ctx.repo_name.clone(),
         subtitle,
         body,
         sound: if sound.is_empty() { None } else { Some(sound.to_string()) },
-        group: input.session_id.clone().unwrap_or(repo.name),
-        activate: focus::session_bundle_id(),
-        click_path: Some(click_path.to_string_lossy().into_owned()),
+        group: ctx.session_id.clone(),
+        activate: ctx.bundle_id.clone(),
+        click_path: Some(ctx.repo_root.clone().unwrap_or_else(|| ctx.cwd.clone())),
         icon: notify::resolve_icon(cfg),
     }
 }
@@ -116,7 +170,8 @@ pub fn run_test() -> Result<()> {
     let cfg = config::load();
     let backend = notify::detect(&cfg);
     let input = HookInput { session_id: Some("tachi-noti-test".into()), ..Default::default() };
-    let notice = build_notice(&input, &cfg, "Tachi Noti is working — woof.".into(), &cfg.sounds.stop);
+    let ctx = build_ctx(&input);
+    let notice = build_notice(&cfg, &ctx, "Tachi Noti is working — woof.".into(), &cfg.sounds.stop);
 
     println!("backend:  {}", backend.name());
     println!("title:    {}", notice.title);
@@ -176,12 +231,19 @@ pub fn run_doctor() -> Result<()> {
                 println!("settings {scope:7}: {} (no tachi-noti hooks)", path.display());
             } else {
                 println!("settings {scope:7}: {} [{}]", path.display(), events.join(", "));
+                let missing = settings::missing_events(&path);
+                if !missing.is_empty() {
+                    println!("                  run 'tachi-noti install' to add: {}", missing.join(", "));
+                }
             }
         } else {
             println!("settings {scope:7}: {} (missing)", path.display());
         }
     }
-    println!("sessions dir:     {} ({} pending)", sessions::sessions_dir().display(), sessions::pending_count());
+    println!("state dir:        {} ({} live sessions)", state::state_dir().display(), state::live_count());
+    let hp = history::history_path();
+    let size = std::fs::metadata(&hp).map(|m| m.len()).unwrap_or(0);
+    println!("history:          {} ({} entries, {} KB)", hp.display(), history::entry_count(), size / 1024);
     Ok(())
 }
 

@@ -1,9 +1,26 @@
 [package]
 name = "tachi-noti"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Tachi the butler collie delivers native macOS notifications for Claude Code hooks"
 license = "MIT"
+
+[lib]
+name = "tachi_noti"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tachi-noti"
+path = "src/main.rs"
+
+[[bin]]
+name = "tachi-bar"
+path = "src/bin/tachi-bar.rs"
+required-features = ["bar"]
+
+[features]
+default = []
+bar = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -11,6 +28,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 dirs = "6"
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, features = [
+    "NSString", "NSDate", "NSTimer", "NSRunLoop", "NSThread", "NSObjCRuntime",
+] }
+objc2-app-kit = { version = "0.3", optional = true, features = [
+    "NSApplication", "NSRunningApplication", "NSResponder",
+    "NSStatusBar", "NSStatusItem", "NSStatusBarButton",
+    "NSMenu", "NSMenuItem", "NSButton", "NSControl", "NSView", "NSCell",
+] }
 
 [profile.release]
 opt-level = "s"

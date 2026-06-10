@@ -154,9 +154,15 @@ const VSCODE_FAMILY: &[&str] = &[
 ];
 
 /// Apps that keep one window per opened folder, where `open -b <bundle> <dir>`
-/// focuses that exact window. TERM_PROGRAM=vscode catches unlisted forks.
-fn vscode_family(bundle_id: &str) -> bool {
+/// focuses that exact window.
+pub fn vscode_family_bundle(bundle_id: &str) -> bool {
     VSCODE_FAMILY.contains(&bundle_id)
+}
+
+/// Hook-path variant: TERM_PROGRAM=vscode catches unlisted forks, but is only
+/// meaningful inside the hook process (inherited from the hosting IDE).
+fn vscode_family(bundle_id: &str) -> bool {
+    vscode_family_bundle(bundle_id)
         || std::env::var("TERM_PROGRAM").map(|t| t == "vscode").unwrap_or(false)
 }
 

@@ -1,14 +1,22 @@
-use crate::Scope;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum Scope {
+    User,
+    Project,
+}
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const EVENTS: [(&str, Option<&str>); 3] = [
+const EVENTS: [(&str, Option<&str>); 6] = [
     ("Stop", None),
     ("Notification", Some("permission_prompt|idle_prompt")),
     ("UserPromptSubmit", None),
+    ("SessionStart", None),
+    ("SessionEnd", None),
+    ("PostToolUse", None),
 ];
 
 fn settings_path(scope: Scope) -> Result<PathBuf> {
@@ -190,6 +198,20 @@ pub fn installed_events(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Events from the current EVENTS set not yet present in this settings file
+/// (after an upgrade, prompts the user to re-run install).
+pub fn missing_events(path: &Path) -> Vec<String> {
+    let installed = installed_events(path);
+    if installed.is_empty() {
+        return vec![]; // not installed at all — different message
+    }
+    EVENTS
+        .iter()
+        .filter(|(event, _)| !installed.iter().any(|e| e == event))
+        .map(|(event, _)| event.to_string())
+        .collect()
+}
+
 pub fn doctor_paths() -> Vec<(String, PathBuf)> {
     let mut v = Vec::new();
     if let Ok(p) = settings_path(Scope::User) {
@@ -223,11 +245,13 @@ mod tests {
         })
     }
 
+    const ALL_EVENTS: [&str; 6] = ["Stop", "Notification", "UserPromptSubmit", "SessionStart", "SessionEnd", "PostToolUse"];
+
     #[test]
     fn install_into_empty() {
         let mut root = json!({});
         let added = merge_install(&mut root, CMD).unwrap();
-        assert_eq!(added, vec!["Stop", "Notification", "UserPromptSubmit"]);
+        assert_eq!(added, ALL_EVENTS.to_vec());
         assert_eq!(root["hooks"]["Notification"][0]["matcher"], "permission_prompt|idle_prompt");
         assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], CMD);
         assert!(root["hooks"]["Stop"][0].get("matcher").is_none());
@@ -268,13 +292,29 @@ mod tests {
         let mut root = existing_settings();
         merge_install(&mut root, CMD).unwrap();
         let removed = merge_uninstall(&mut root);
-        assert_eq!(removed, vec!["Stop", "Notification", "UserPromptSubmit"]);
+        assert_eq!(removed, ALL_EVENTS.to_vec());
         // claude-buddy intact, Notification array dropped entirely.
         assert_eq!(root["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], "claude-buddy stop-hook");
         assert!(root["hooks"].get("Notification").is_none());
         // Uninstall again is a no-op.
         assert!(merge_uninstall(&mut root).is_empty());
+    }
+
+    #[test]
+    fn install_adds_new_events_to_existing() {
+        // A v0.1 install only had the first three events; upgrading must add
+        // exactly the new ones without touching the old groups.
+        let mut root = json!({
+            "hooks": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": CMD }] }],
+                "Notification": [{ "matcher": "permission_prompt|idle_prompt", "hooks": [{ "type": "command", "command": CMD }] }],
+                "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": CMD }] }]
+            }
+        });
+        let added = merge_install(&mut root, CMD).unwrap();
+        assert_eq!(added, vec!["SessionStart", "SessionEnd", "PostToolUse"]);
+        assert_eq!(root["hooks"]["Stop"].as_array().unwrap().len(), 1, "old group untouched");
     }
 
     #[test]

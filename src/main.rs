@@ -1,13 +1,5 @@
-mod config;
-mod focus;
-mod gitinfo;
-mod hook;
-mod notify;
-mod sessions;
-mod settings;
-mod transcript;
-
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+use tachi_noti::{Scope, hook, settings};
 
 #[derive(Parser)]
 #[command(name = "tachi-noti", version, about = "Tachi Noti — native macOS notifications for Claude Code hooks, delivered by Tachi the butler collie")]
@@ -30,16 +22,15 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = Scope::User)]
         scope: Scope,
     },
+    /// Show recent notification history
+    Log {
+        #[arg(short = 'n', long, default_value_t = 20)]
+        lines: usize,
+    },
     /// Fire a sample notification to verify setup
     Test,
     /// Print diagnostic information
     Doctor,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-pub enum Scope {
-    User,
-    Project,
 }
 
 fn main() {
@@ -56,6 +47,7 @@ fn main() {
         }
         Cmd::Install { scope } => exit_on_err(settings::install(scope)),
         Cmd::Uninstall { scope } => exit_on_err(settings::uninstall(scope)),
+        Cmd::Log { lines } => tachi_noti::history::print_log(lines),
         Cmd::Test => exit_on_err(hook::run_test()),
         Cmd::Doctor => exit_on_err(hook::run_doctor()),
     }
