@@ -39,7 +39,12 @@ mod agent {
             .join(format!("{LABEL}.plist"))
     }
 
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
     fn plist(exe: &str) -> String {
+        let exe = xml_escape(exe);
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

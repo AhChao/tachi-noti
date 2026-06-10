@@ -29,7 +29,15 @@ fn settings_path(scope: Scope) -> Result<PathBuf> {
 fn hook_command() -> String {
     std::env::current_exe()
         .and_then(|p| p.canonicalize())
-        .map(|p| format!("{} hook", p.display()))
+        .map(|p| {
+            let path = p.display().to_string();
+            // Hook commands run through a shell; quote paths that need it.
+            if path.contains(' ') || path.contains('\'') || path.contains('"') {
+                format!("'{}' hook", path.replace('\'', "'\\''"))
+            } else {
+                format!("{path} hook")
+            }
+        })
         .unwrap_or_else(|_| "tachi-noti hook".to_string())
 }
 

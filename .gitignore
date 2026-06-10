@@ -1,1 +1,6 @@
 /target
+.DS_Store
+
+# Local install artifacts — project-scope installs embed absolute paths
+.claude/
+settings.json.bak.*
