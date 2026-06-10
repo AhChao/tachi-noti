@@ -8,7 +8,9 @@ Native macOS notifications for [Claude Code](https://code.claude.com) hooks, del
 
 Tachi is a sharp-eyed Border Collie in a tailcoat and bow tie. Herding is in his blood; these days the flock is your Claude Code sessions. He keeps quiet while you're at the terminal — a good butler never interrupts — but the moment you wander off and something needs you, he pads over with a discreet announcement: the task is done, or Claude is waiting on your word. One session, one notification; he tidies up after himself.
 
-His portrait rides along inside the binary, so every notification arrives with his face on it.
+His portrait rides along inside the binary, so every notification arrives with his face on it:
+
+<img src="assets/tachi-head.png" width="64" alt="Tachi's notification thumbnail — a close-up of his face">
 
 ## What he announces
 
@@ -22,8 +24,8 @@ His portrait rides along inside the binary, so every notification arrives with h
 
 `tachi-bar` is an optional, tiny (~2 MB) menu bar companion that watches every live Claude Code session at once:
 
-- Sessions **grouped by repo root** (worktrees get their own groups), each row showing status — 🟢 running / 🟡 waiting for you / ⚪ idle — and how long, with the elapsed time ticking live while the menu is open.
-- The menu bar title is an at-a-glance summary: `🟡1 🟢2` (waiting first — it needs you), or 🐕 when all is calm.
+- Sessions **grouped by repo root** (worktrees get their own groups), each row carrying a native tinted status dot — green running / yellow waiting for you / gray idle — and how long, with the elapsed time ticking live while the menu is open.
+- The menu bar shows a dog symbol with an at-a-glance count like `🐕 ●1 ●2` (waiting first — it needs you); just the dog when all is calm. Stale "running" sessions that died without cleanup are demoted automatically so the counts stay honest.
 - **Click a session to jump to its exact IDE window** (same window-precise focus as the notifications).
 - A "Recent notifications" submenu (last 5), a Launch-at-Login toggle, and nothing else.
 
