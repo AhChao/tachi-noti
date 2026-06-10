@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 pub struct RepoInfo {
     pub name: String,
     pub branch: Option<String>,
+    /// Repo root — the folder an IDE window would have open.
+    pub toplevel: Option<PathBuf>,
 }
 
 /// Resolve project name and git branch by walking up from `cwd` and reading
@@ -11,9 +13,9 @@ pub struct RepoInfo {
 pub fn detect(cwd: &Path) -> RepoInfo {
     let fallback_name = basename(cwd);
     let Some((toplevel, gitdir)) = find_gitdir(cwd) else {
-        return RepoInfo { name: fallback_name, branch: None };
+        return RepoInfo { name: fallback_name, branch: None, toplevel: None };
     };
-    RepoInfo { name: basename(&toplevel), branch: read_branch(&gitdir) }
+    RepoInfo { name: basename(&toplevel), branch: read_branch(&gitdir), toplevel: Some(toplevel) }
 }
 
 fn basename(p: &Path) -> String {

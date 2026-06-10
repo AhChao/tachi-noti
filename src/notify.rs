@@ -16,6 +16,8 @@ pub struct Notice {
     pub group: String,
     /// Bundle id to activate on click (terminal-notifier only).
     pub activate: Option<String>,
+    /// Project folder for window-precise click focus (terminal-notifier only).
+    pub click_path: Option<String>,
     /// Image path shown on the notification (terminal-notifier only).
     pub icon: Option<String>,
 }
@@ -118,7 +120,18 @@ fn send_terminal_notifier(path: &PathBuf, n: &Notice) -> Result<()> {
         // notification and clicking activates the sender app instead. Prefer a
         // working click-to-focus over the nicer icon.
         Some(bid) => {
-            cmd.arg("-activate").arg(bid);
+            // -activate only raises the app's last-used window. VS Code-family
+            // apps keep one window per folder, so opening the project path
+            // focuses the exact window hosting this session.
+            match n.click_path.as_deref().filter(|_| vscode_family(bid)) {
+                Some(path) => {
+                    cmd.arg("-execute")
+                        .arg(format!("/usr/bin/open -b {} {}", sh_quote(bid), sh_quote(path)));
+                }
+                None => {
+                    cmd.arg("-activate").arg(bid);
+                }
+            }
         }
         None => {
             cmd.arg("-sender").arg("com.apple.Terminal");
@@ -129,6 +142,27 @@ fn send_terminal_notifier(path: &PathBuf, n: &Notice) -> Result<()> {
         return Err(format!("terminal-notifier exited with {status}").into());
     }
     Ok(())
+}
+
+const VSCODE_FAMILY: &[&str] = &[
+    "com.microsoft.VSCode",
+    "com.microsoft.VSCodeInsiders",
+    "com.vscodium",
+    "com.google.antigravity-ide",
+    "com.todesktop.230313mzl4w4u92", // Cursor
+    "com.exafunction.windsurf",
+];
+
+/// Apps that keep one window per opened folder, where `open -b <bundle> <dir>`
+/// focuses that exact window. TERM_PROGRAM=vscode catches unlisted forks.
+fn vscode_family(bundle_id: &str) -> bool {
+    VSCODE_FAMILY.contains(&bundle_id)
+        || std::env::var("TERM_PROGRAM").map(|t| t == "vscode").unwrap_or(false)
+}
+
+/// POSIX single-quote escaping for the -execute command string.
+pub fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// terminal-notifier misparses messages starting with '-' or '[' as flags;
@@ -170,6 +204,20 @@ mod tests {
         assert!(guard_leading_dash("-rf something").starts_with('\u{200B}'));
         assert!(guard_leading_dash("[ok] done").starts_with('\u{200B}'));
         assert_eq!(guard_leading_dash("normal"), "normal");
+    }
+
+    #[test]
+    fn sh_quote_escapes_safely() {
+        assert_eq!(sh_quote("/plain/path"), "'/plain/path'");
+        assert_eq!(sh_quote("a'b"), "'a'\\''b'");
+        assert_eq!(sh_quote("$(rm -rf /); `boom`"), "'$(rm -rf /); `boom`'");
+    }
+
+    #[test]
+    fn vscode_family_knows_forks() {
+        assert!(VSCODE_FAMILY.contains(&"com.google.antigravity-ide"));
+        assert!(VSCODE_FAMILY.contains(&"com.microsoft.VSCode"));
+        assert!(!VSCODE_FAMILY.contains(&"com.apple.Terminal"));
     }
 
     #[test]

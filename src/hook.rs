@@ -99,6 +99,7 @@ fn build_notice(input: &HookInput, cfg: &config::Config, body: String, sound: &s
         .as_deref()
         .map(|b| format!("{} @ {b}", repo.name))
         .unwrap_or_default();
+    let click_path = repo.toplevel.clone().unwrap_or_else(|| cwd.clone());
     Notice {
         title: repo.name.clone(),
         subtitle,
@@ -106,6 +107,7 @@ fn build_notice(input: &HookInput, cfg: &config::Config, body: String, sound: &s
         sound: if sound.is_empty() { None } else { Some(sound.to_string()) },
         group: input.session_id.clone().unwrap_or(repo.name),
         activate: focus::session_bundle_id(),
+        click_path: Some(click_path.to_string_lossy().into_owned()),
         icon: notify::resolve_icon(cfg),
     }
 }
@@ -122,7 +124,10 @@ pub fn run_test() -> Result<()> {
         println!("subtitle: {}", notice.subtitle);
     }
     if let Some(bid) = &notice.activate {
-        println!("click-to-focus: {bid}");
+        match &notice.click_path {
+            Some(p) => println!("click-to-focus: {bid} → window for {p}"),
+            None => println!("click-to-focus: {bid}"),
+        }
     }
     if cfg.focus_suppression && focus::session_is_frontmost() {
         println!("note: focus suppression would normally skip this (host app is frontmost); sending anyway for the test.");
