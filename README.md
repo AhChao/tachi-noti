@@ -24,8 +24,8 @@ His portrait rides along inside the binary, so every notification arrives with h
 
 `tachi-bar` is an optional, tiny (~2 MB) menu bar companion that watches every live Claude Code session at once:
 
-- Sessions **grouped by repo root** (worktrees get their own groups), each row carrying a native tinted status dot — green running / yellow waiting for you / gray idle — and how long, with the elapsed time ticking live while the menu is open.
-- Waiting rows say **what** they're waiting for: `plan ready?` (ExitPlanMode approval), `question?` (AskUserQuestion), `permission · <command>` (the exact command inline, full text on hover), or plain waiting. Permission detection uses the `PermissionRequest` hook (fires only when a dialog actually appears, so auto-allowed tools never show as waiting).
+- Sessions **grouped by repo root** (worktrees get their own groups), each row carrying a native tinted status dot, with the elapsed time ticking live while the menu is open. The semantics are strict: **green = working, yellow = blocked on you, gray = turn finished (free capacity)**. Claude Code's `idle_prompt` ("you haven't replied for a minute") is deliberately ignored — a finished session is spare capacity, not a blocker, and letting it turn yellow made every session scream for attention.
+- Yellow rows say **what** they're blocked on: `plan ready?` (ExitPlanMode approval), `question?` (AskUserQuestion), `permission · <command>` (the exact command inline, full text on hover). Permission detection uses the `PermissionRequest` hook (fires only when a dialog actually appears, so auto-allowed tools never show as waiting).
 - The menu bar shows a dog symbol with an at-a-glance count like `🐕 ●1 ●2` (waiting first — it needs you); just the dog when all is calm. Stale "running" sessions that died without cleanup are demoted automatically so the counts stay honest.
 - **Click a session to jump to its exact IDE window** (same window-precise focus as the notifications).
 - A "Recent notifications" submenu (last 5), a Launch-at-Login toggle, and nothing else.
@@ -91,7 +91,7 @@ The installed hooks are:
 - `SessionStart` / `SessionEnd` — create and remove the session's state file (also prunes files older than 48 h).
 - `UserPromptSubmit` — marks the session running and stamps the task start time; no notification.
 - `Stop` — marks it idle, reads the last assistant message from the transcript JSONL (tail-reads the last 256 KB, skips tool-use-only and subagent lines), computes elapsed time, notifies, logs to history.
-- `Notification` (matcher `permission_prompt|idle_prompt`) — marks the session waiting and relays the message (skipped under `bypassPermissions`, where the prompt resolves itself).
+- `Notification` (matcher `permission_prompt|idle_prompt`) — permission prompts mark the session waiting and relay the message (skipped under `bypassPermissions`, where the prompt resolves itself); idle prompts are ignored by design.
 - `PermissionRequest` — classifies the wait with structured tool info: ExitPlanMode → plan approval, anything else → permission with the exact command/file. Richer details are never overwritten by the generic Notification text.
 - `PreToolUse` (matcher `AskUserQuestion`) — Claude Code fires **no Notification** for multiple-choice questions (the session waits silently); this hook both marks the wait and sends the otherwise-missing popup with the question text.
 - `PostToolUse` — flips waiting back to running once a permission is answered; plan/question waits are only cleared by their own tool completing, so a parallel subagent's tool results can't hide them. Otherwise just a ≤1-per-minute liveness heartbeat.

@@ -131,7 +131,9 @@ fn on_notification(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
             }
             state::WaitingInfo { kind: state::WaitKind::Permission, detail: input.message.clone() }
         }
-        Some("idle_prompt") => state::WaitingInfo { kind: state::WaitKind::Idle, detail: None },
+        // idle_prompt = the turn already finished and the user just hasn't
+        // replied. That's ⚪ free capacity, not 🟡 blocked — turning it yellow
+        // (plus a popup) made every finished session scream for attention.
         Some(_) => return Ok(()),
     };
     // State first: suppressing the popup must not suppress the Waiting state.

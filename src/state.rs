@@ -47,6 +47,8 @@ pub enum WaitKind {
     Permission,
     Plan,
     Question,
+    /// Legacy: no longer produced (idle_prompt is ignored — a finished turn is
+    /// free capacity, not a blocker). Kept so old state files still parse.
     Idle,
 }
 
