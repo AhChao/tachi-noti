@@ -5,6 +5,11 @@ use std::process::Command;
 /// Tachi's portrait, embedded so the binary stays self-contained.
 const TACHI_ICON: &[u8] = include_bytes!("../assets/tachi-head.png");
 
+/// Tachi's bark (one woof), embedded and materialized into ~/Library/Sounds
+/// so macOS can play it by name like any system notification sound.
+const TACHI_BARK: &[u8] = include_bytes!("../assets/tachi-bark.aiff");
+pub const BARK_SOUND_NAME: &str = "TachiBark";
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct Notice {
@@ -92,9 +97,24 @@ pub fn find_in_path(bin: &str) -> Option<PathBuf> {
 }
 
 pub fn send(backend: &Backend, n: &Notice) -> Result<()> {
+    if n.sound.as_deref() == Some(BARK_SOUND_NAME) {
+        ensure_bark_sound();
+    }
     match backend {
         Backend::TerminalNotifier(path) => send_terminal_notifier(path, n),
         Backend::OsaScript => send_osascript(n),
+    }
+}
+
+/// Install the embedded bark into ~/Library/Sounds (macOS looks notification
+/// sounds up by name there). Length check re-materializes on upgrades.
+pub fn ensure_bark_sound() {
+    let Some(home) = dirs::home_dir() else { return };
+    let dir = home.join("Library/Sounds");
+    let path = dir.join(format!("{BARK_SOUND_NAME}.aiff"));
+    let stale = std::fs::metadata(&path).map(|m| m.len() != TACHI_BARK.len() as u64).unwrap_or(true);
+    if stale && std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(&path, TACHI_BARK);
     }
 }
 
