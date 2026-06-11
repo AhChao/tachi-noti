@@ -10,13 +10,15 @@ pub enum Scope {
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const EVENTS: [(&str, Option<&str>); 6] = [
+const EVENTS: [(&str, Option<&str>); 8] = [
     ("Stop", None),
     ("Notification", Some("permission_prompt|idle_prompt")),
     ("UserPromptSubmit", None),
     ("SessionStart", None),
     ("SessionEnd", None),
     ("PostToolUse", None),
+    ("PermissionRequest", None),
+    ("PreToolUse", Some("AskUserQuestion")),
 ];
 
 fn settings_path(scope: Scope) -> Result<PathBuf> {
@@ -253,7 +255,10 @@ mod tests {
         })
     }
 
-    const ALL_EVENTS: [&str; 6] = ["Stop", "Notification", "UserPromptSubmit", "SessionStart", "SessionEnd", "PostToolUse"];
+    const ALL_EVENTS: [&str; 8] = [
+        "Stop", "Notification", "UserPromptSubmit", "SessionStart", "SessionEnd", "PostToolUse",
+        "PermissionRequest", "PreToolUse",
+    ];
 
     #[test]
     fn install_into_empty() {
@@ -321,8 +326,9 @@ mod tests {
             }
         });
         let added = merge_install(&mut root, CMD).unwrap();
-        assert_eq!(added, vec!["SessionStart", "SessionEnd", "PostToolUse"]);
+        assert_eq!(added, vec!["SessionStart", "SessionEnd", "PostToolUse", "PermissionRequest", "PreToolUse"]);
         assert_eq!(root["hooks"]["Stop"].as_array().unwrap().len(), 1, "old group untouched");
+        assert_eq!(root["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion");
     }
 
     #[test]

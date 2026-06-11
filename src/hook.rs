@@ -16,6 +16,9 @@ pub struct HookInput {
     pub message: Option<String>,
     pub source: Option<String>,
     pub reason: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub permission_mode: Option<String>,
 }
 
 pub fn run() -> Result<()> {
@@ -38,8 +41,13 @@ pub fn run() -> Result<()> {
         }
         "Stop" => on_stop(&input, &cfg, &ctx),
         "Notification" => on_notification(&input, &cfg, &ctx),
+        "PermissionRequest" => {
+            transition(&ctx, state::Event::Waiting(permission_wait_info(&input)));
+            Ok(())
+        }
+        "PreToolUse" => on_pre_tool_use(&input, &cfg, &ctx),
         "PostToolUse" => {
-            transition(&ctx, state::Event::PostToolUse);
+            transition(&ctx, state::Event::PostToolUse { tool_name: input.tool_name.as_deref() });
             Ok(())
         }
         "SessionEnd" => {
@@ -114,12 +122,20 @@ fn on_stop(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<
 fn on_notification(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<()> {
     // The installed matcher already filters, but stay defensive in case the
     // hook is registered with a broader matcher.
-    match input.notification_type.as_deref() {
-        Some("permission_prompt") | Some("idle_prompt") | None => {}
+    let info = match input.notification_type.as_deref() {
+        Some("permission_prompt") | None => {
+            // In bypass mode the prompt resolves itself — a popup and a
+            // Waiting state would both be false alarms.
+            if input.permission_mode.as_deref() == Some("bypassPermissions") {
+                return Ok(());
+            }
+            state::WaitingInfo { kind: state::WaitKind::Permission, detail: input.message.clone() }
+        }
+        Some("idle_prompt") => state::WaitingInfo { kind: state::WaitKind::Idle, detail: None },
         Some(_) => return Ok(()),
-    }
+    };
     // State first: suppressing the popup must not suppress the Waiting state.
-    transition(ctx, state::Event::Waiting);
+    transition(ctx, state::Event::Waiting(info));
 
     if cfg.focus_suppression && focus::session_is_frontmost() {
         return Ok(());
@@ -134,6 +150,49 @@ fn on_notification(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
     let notice = build_notice(cfg, ctx, body, &cfg.sounds.attention);
     notify::send(&notify::detect(cfg), &notice)?;
     record_history("notification", ctx, &notice.body);
+    Ok(())
+}
+
+/// PermissionRequest carries structured tool info — summarize what approval
+/// is being asked for. ExitPlanMode's dialog is the plan-approval prompt.
+fn permission_wait_info(input: &HookInput) -> state::WaitingInfo {
+    if input.tool_name.as_deref() == Some("ExitPlanMode") {
+        return state::WaitingInfo { kind: state::WaitKind::Plan, detail: Some("plan ready — approve?".into()) };
+    }
+    let detail = match (input.tool_name.as_deref(), &input.tool_input) {
+        (Some("Bash"), Some(v)) => v["command"].as_str().map(|c| transcript::squash(c, 80)),
+        (Some(t), Some(v)) => v["file_path"]
+            .as_str()
+            .map(|p| format!("{t}: {}", p.rsplit('/').next().unwrap_or(p)))
+            .or_else(|| Some(t.to_string())),
+        (Some(t), None) => Some(t.to_string()),
+        _ => None,
+    };
+    state::WaitingInfo { kind: state::WaitKind::Permission, detail }
+}
+
+/// AskUserQuestion never fires a Notification (the session waits silently),
+/// so this is both the state transition and the missing popup.
+fn on_pre_tool_use(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<()> {
+    if input.tool_name.as_deref() != Some("AskUserQuestion") {
+        return Ok(()); // defensive: matcher should already scope us
+    }
+    let question = input
+        .tool_input
+        .as_ref()
+        .and_then(|v| v["questions"][0]["question"].as_str())
+        .map(str::to_string);
+    let info = state::WaitingInfo { kind: state::WaitKind::Question, detail: question.clone() };
+    transition(ctx, state::Event::Waiting(info));
+
+    if cfg.focus_suppression && focus::session_is_frontmost() {
+        return Ok(());
+    }
+    let body = question.unwrap_or_else(|| "Claude has a question for you".to_string());
+    let body = transcript::squash(&body, cfg.max_body_len);
+    let notice = build_notice(cfg, ctx, body, &cfg.sounds.attention);
+    notify::send(&notify::detect(cfg), &notice)?;
+    record_history("question", ctx, &notice.body);
     Ok(())
 }
 

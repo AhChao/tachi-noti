@@ -30,6 +30,35 @@ pub struct SessionState {
     pub status_since: u64,
     pub task_started_at: Option<u64>,
     pub last_event_at: u64,
+    /// What the session is waiting on, when status == Waiting.
+    #[serde(default)]
+    pub waiting: Option<WaitingInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WaitingInfo {
+    pub kind: WaitKind,
+    pub detail: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitKind {
+    Permission,
+    Plan,
+    Question,
+    Idle,
+}
+
+impl WaitKind {
+    /// Signal specificity: a weaker signal must never overwrite a stronger one.
+    fn rank(self) -> u8 {
+        match self {
+            WaitKind::Plan | WaitKind::Question => 3,
+            WaitKind::Permission => 2,
+            WaitKind::Idle => 1,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -54,8 +83,8 @@ pub enum Event<'a> {
     SessionStart { source: Option<&'a str> },
     PromptSubmit,
     Stop,
-    Waiting,
-    PostToolUse,
+    Waiting(WaitingInfo),
+    PostToolUse { tool_name: Option<&'a str> },
 }
 
 pub struct Transition {
@@ -83,6 +112,7 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
         status_since: now,
         task_started_at: None,
         last_event_at: now,
+        waiting: None,
     };
     // Refresh identity fields on every event (branch may change mid-session).
     let carry = |mut s: SessionState| {
@@ -101,6 +131,9 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
             s.status_since = now;
         }
         s.status = status;
+        if status != Status::Waiting {
+            s.waiting = None;
+        }
         s
     };
 
@@ -128,16 +161,35 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
             s.task_started_at = None;
             Transition { save: Some(s), task_duration: duration }
         }
-        Event::Waiting => {
+        Event::Waiting(info) => {
             // Keep task_started_at — the task is still in flight.
-            let s = set_status(prev.map(carry).unwrap_or_else(|| fresh(Status::Waiting)), Status::Waiting);
+            let mut s = set_status(prev.map(carry).unwrap_or_else(|| fresh(Status::Waiting)), Status::Waiting);
+            // Upgrade, never downgrade: a weaker signal (e.g. the generic
+            // Notification message) must not clobber a richer one (e.g. the
+            // exact command from PermissionRequest).
+            s.waiting = match s.waiting.take() {
+                Some(old) if old.kind.rank() > info.kind.rank() => Some(old),
+                Some(old) if old.kind.rank() == info.kind.rank() && old.detail.is_some() => Some(old),
+                _ => Some(info),
+            };
             Transition { save: Some(s), task_duration: None }
         }
-        Event::PostToolUse => match prev {
+        Event::PostToolUse { tool_name } => match prev {
             Some(s) if s.status == Status::Waiting => {
-                // Permission was answered; the task is running again.
-                let s = set_status(carry(s), Status::Running);
-                Transition { save: Some(s), task_duration: None }
+                // Plan/question waits end only when their own tool completes
+                // (a parallel subagent's tool result must not clear them);
+                // permission waits end on any tool completing.
+                let resolved = match s.waiting.as_ref().map(|w| w.kind) {
+                    Some(WaitKind::Plan) => tool_name == Some("ExitPlanMode"),
+                    Some(WaitKind::Question) => tool_name == Some("AskUserQuestion"),
+                    _ => true,
+                };
+                if resolved {
+                    let s = set_status(carry(s), Status::Running);
+                    Transition { save: Some(s), task_duration: None }
+                } else {
+                    Transition { save: Some(carry(s)), task_duration: None }
+                }
             }
             Some(s) if file_age_secs.map(|a| a >= HEARTBEAT_SECS).unwrap_or(true) => {
                 Transition { save: Some(carry(s)), task_duration: None }
@@ -270,14 +322,16 @@ mod tests {
         assert_eq!(s.task_started_at, Some(110));
         assert_eq!(s.status_since, 110);
 
-        let t = apply_event(Some(s), &c, Event::Waiting, 150, Some(0));
+        let t = apply_event(Some(s), &c, Event::Waiting(wait(WaitKind::Permission, Some("cargo test"))), 150, Some(0));
         let s = t.save.unwrap();
         assert_eq!(s.status, Status::Waiting);
         assert_eq!(s.task_started_at, Some(110), "waiting keeps the task in flight");
+        assert_eq!(s.waiting.as_ref().unwrap().detail.as_deref(), Some("cargo test"));
 
-        let t = apply_event(Some(s), &c, Event::PostToolUse, 160, Some(0));
+        let t = apply_event(Some(s), &c, Event::PostToolUse { tool_name: Some("Bash") }, 160, Some(0));
         let s = t.save.unwrap();
         assert_eq!(s.status, Status::Running, "answered permission resumes running");
+        assert_eq!(s.waiting, None, "leaving Waiting clears the reason");
 
         let t = apply_event(Some(s), &c, Event::Stop, 310, Some(0));
         let s = t.save.unwrap();
@@ -311,10 +365,60 @@ mod tests {
     fn post_tool_use_heartbeat_throttles() {
         let c = ctx("s4");
         let s = apply_event(None, &c, Event::PromptSubmit, 100, None).save.unwrap();
-        let t = apply_event(Some(s.clone()), &c, Event::PostToolUse, 130, Some(10));
+        let t = apply_event(Some(s.clone()), &c, Event::PostToolUse { tool_name: Some("Read") }, 130, Some(10));
         assert!(t.save.is_none(), "fresh file: no write");
-        let t = apply_event(Some(s), &c, Event::PostToolUse, 200, Some(90));
+        let t = apply_event(Some(s), &c, Event::PostToolUse { tool_name: Some("Read") }, 200, Some(90));
         assert!(t.save.is_some(), "old file: heartbeat write");
+    }
+
+    fn wait(kind: WaitKind, detail: Option<&str>) -> WaitingInfo {
+        WaitingInfo { kind, detail: detail.map(str::to_string) }
+    }
+
+    #[test]
+    fn weaker_signal_never_downgrades_waiting() {
+        let c = ctx("s6");
+        let s = apply_event(None, &c, Event::Waiting(wait(WaitKind::Permission, Some("rm -rf target"))), 100, None)
+            .save
+            .unwrap();
+        // Generic Notification arrives after the rich PermissionRequest.
+        let s = apply_event(
+            Some(s),
+            &c,
+            Event::Waiting(wait(WaitKind::Permission, Some("Claude needs your permission"))),
+            101,
+            Some(0),
+        )
+        .save
+        .unwrap();
+        assert_eq!(s.waiting.as_ref().unwrap().detail.as_deref(), Some("rm -rf target"));
+        // Idle signal must not clobber a plan wait.
+        let s = apply_event(Some(s), &c, Event::Waiting(wait(WaitKind::Plan, None)), 102, Some(0)).save.unwrap();
+        let s = apply_event(Some(s), &c, Event::Waiting(wait(WaitKind::Idle, None)), 103, Some(0)).save.unwrap();
+        assert_eq!(s.waiting.as_ref().unwrap().kind, WaitKind::Plan);
+    }
+
+    #[test]
+    fn plan_wait_survives_unrelated_tool_results() {
+        let c = ctx("s7");
+        let s = apply_event(None, &c, Event::Waiting(wait(WaitKind::Plan, None)), 100, None).save.unwrap();
+        // A parallel subagent's Bash result must not clear the plan-approval wait.
+        let s = apply_event(Some(s), &c, Event::PostToolUse { tool_name: Some("Bash") }, 110, Some(0)).save.unwrap();
+        assert_eq!(s.status, Status::Waiting);
+        assert_eq!(s.waiting.as_ref().unwrap().kind, WaitKind::Plan);
+        // Its own tool completing does clear it.
+        let s = apply_event(Some(s), &c, Event::PostToolUse { tool_name: Some("ExitPlanMode") }, 120, Some(0))
+            .save
+            .unwrap();
+        assert_eq!(s.status, Status::Running);
+    }
+
+    #[test]
+    fn old_state_files_without_waiting_field_deserialize() {
+        let json = r#"{"version":1,"session_id":"x","repo_name":"r","repo_root":null,"branch":null,
+            "bundle_id":null,"cwd":"/tmp","status":"idle","status_since":1,"task_started_at":null,"last_event_at":1}"#;
+        let s: SessionState = serde_json::from_str(json).unwrap();
+        assert_eq!(s.waiting, None);
     }
 
     #[test]

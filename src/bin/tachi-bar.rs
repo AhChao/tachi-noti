@@ -282,6 +282,7 @@ mod ui {
                 let row = bar::build_row(s, &a.group_key, now);
                 item.setTitle(&NSString::from_str(&row.label));
                 item.setImage(status_image(row.status).as_deref());
+                item.setToolTip(row.tooltip.map(|t| NSString::from_str(&t)).as_deref());
             }
         }
 
@@ -323,6 +324,7 @@ mod ui {
                     let item = NSMenuItem::new(mtm);
                     item.setTitle(&NSString::from_str(&row.label));
                     item.setImage(status_image(row.status).as_deref());
+                    item.setToolTip(row.tooltip.as_deref().map(NSString::from_str).as_deref());
                     if row.enabled {
                         let target: &AnyObject = self;
                         unsafe {

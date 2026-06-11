@@ -2,7 +2,7 @@
 //! renderable snapshot. No AppKit here so it stays unit-testable.
 
 use crate::notify;
-use crate::state::{SessionState, Status, format_duration};
+use crate::state::{SessionState, Status, WaitKind, format_duration};
 use std::time::Duration;
 
 /// Sessions silent this long disappear from the menu (died without SessionEnd).
@@ -27,16 +27,23 @@ pub struct Group {
 pub struct Row {
     pub status: Status,
     pub label: String,
+    /// Full waiting detail for hover (label only carries a truncated hint).
+    pub tooltip: Option<String>,
     pub bundle_id: Option<String>,
     pub open_path: Option<String>,
     pub enabled: bool,
 }
 
-fn status_word(status: Status) -> &'static str {
-    match status {
+fn status_word(s: &SessionState) -> &'static str {
+    match s.status {
         Status::Running => "running",
-        Status::Waiting => "waiting",
         Status::Idle => "idle",
+        Status::Waiting => match s.waiting.as_ref().map(|w| w.kind) {
+            Some(WaitKind::Plan) => "plan ready?",
+            Some(WaitKind::Question) => "question?",
+            Some(WaitKind::Permission) => "permission",
+            Some(WaitKind::Idle) | None => "waiting",
+        },
     }
 }
 
@@ -105,9 +112,17 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
     };
     let elapsed = format_duration(Duration::from_secs(now.saturating_sub(anchor)));
     let id6: String = s.session_id.chars().take(6).collect();
-    let mut label = format!("{} {elapsed} \u{00B7} {id6}", status_word(s.status));
+    let mut label = format!("{} {elapsed} \u{00B7} {id6}", status_word(s));
     if s.cwd != *group_key {
         label.push_str(&format!(" \u{00B7} {}", basename(&s.cwd)));
+    }
+    let waiting_detail = s.waiting.as_ref().and_then(|w| w.detail.clone());
+    // A permission wait names the exact command — surface a hint inline.
+    if s.waiting.as_ref().map(|w| w.kind) == Some(WaitKind::Permission) {
+        if let Some(d) = &waiting_detail {
+            let hint: String = d.chars().take(24).collect();
+            label.push_str(&format!(" \u{00B7} {hint}{}", if d.chars().count() > 24 { "\u{2026}" } else { "" }));
+        }
     }
     let open_path = s
         .bundle_id
@@ -117,6 +132,7 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
     Row {
         status: s.status,
         label,
+        tooltip: waiting_detail,
         bundle_id: s.bundle_id.clone(),
         open_path,
         enabled: s.bundle_id.is_some(),
@@ -168,6 +184,7 @@ mod tests {
             status_since: last_event_at.saturating_sub(60),
             task_started_at: if status == Status::Running { Some(last_event_at.saturating_sub(200)) } else { None },
             last_event_at,
+            waiting: None,
         }
     }
 
@@ -229,6 +246,30 @@ mod tests {
         s.bundle_id = None;
         let snap = build_snapshot(vec![s], 200);
         assert!(!snap.groups[0].rows[0].enabled);
+    }
+
+    #[test]
+    fn waiting_rows_show_semantics() {
+        use crate::state::{WaitKind, WaitingInfo};
+        let mut s = session("abcdef", "/r/p", Status::Waiting, 100);
+        s.waiting = Some(WaitingInfo { kind: WaitKind::Plan, detail: Some("plan ready — approve?".into()) });
+        let snap = build_snapshot(vec![s.clone()], 160);
+        let row = &snap.groups[0].rows[0];
+        assert!(row.label.starts_with("plan ready? 2m00s"), "label was: {}", row.label);
+        assert_eq!(row.tooltip.as_deref(), Some("plan ready — approve?"));
+
+        s.waiting = Some(WaitingInfo {
+            kind: WaitKind::Permission,
+            detail: Some("cargo install --path . --features bar".into()),
+        });
+        let snap = build_snapshot(vec![s.clone()], 160);
+        let row = &snap.groups[0].rows[0];
+        assert!(row.label.starts_with("permission"), "label was: {}", row.label);
+        assert!(row.label.contains("cargo install --path . -\u{2026}"), "inline hint truncated: {}", row.label);
+
+        s.waiting = Some(WaitingInfo { kind: WaitKind::Question, detail: None });
+        let snap = build_snapshot(vec![s], 160);
+        assert!(snap.groups[0].rows[0].label.starts_with("question?"));
     }
 
     #[test]
