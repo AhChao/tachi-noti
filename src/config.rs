@@ -13,6 +13,9 @@ pub struct Config {
     /// Image shown on the notification (terminal-notifier only).
     /// None = bundled Tachi portrait; "" = no image; otherwise a file path.
     pub icon: Option<String>,
+    /// Menu bar shows a red warning when any usage window reaches this
+    /// percentage. 0 disables the warning.
+    pub usage_alert_pct: u8,
 }
 
 #[derive(Deserialize, Debug)]
@@ -32,6 +35,7 @@ impl Default for Config {
             backend: None,
             max_body_len: 120,
             icon: None,
+            usage_alert_pct: 80,
         }
     }
 }

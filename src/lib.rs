@@ -8,5 +8,6 @@ pub mod notify;
 pub mod settings;
 pub mod state;
 pub mod transcript;
+pub mod usage;
 
 pub use settings::Scope;

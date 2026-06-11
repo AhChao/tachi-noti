@@ -161,7 +161,7 @@ mod ui {
     };
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
-    use tachi_noti::{bar, config, history, notify, state};
+    use tachi_noti::{bar, config, history, notify, state, usage};
 
     /// Click target for a menu row, kept session-identified so live label
     /// updates can never attach to the wrong row.
@@ -265,8 +265,9 @@ mod ui {
             unsafe { msg_send![super(this), init] }
         }
 
-        /// Render "●1 ●2" next to the dog icon, dots tinted per status.
-        fn set_title_segments(&self, segments: &[(usize, state::Status)]) {
+        /// Render "●1 ●2" next to the dog icon, dots tinted per status; a red
+        /// ⚠ appears when usage crosses the configured threshold.
+        fn set_title_segments(&self, segments: &[(usize, state::Status)], usage_alert: bool) {
             let Some(item) = self.ivars().status_item.borrow().clone() else { return };
             let Some(button) = item.button(self.mtm()) else { return };
 
@@ -287,6 +288,12 @@ mod ui {
                 }
             }
 
+            let mut alert_loc = None;
+            if usage_alert {
+                alert_loc = Some(plain.encode_utf16().count() + 1);
+                plain.push_str(" \u{26A0}\u{FE0E}"); // ⚠ text-style, tinted red below
+            }
+
             let attr = NSMutableAttributedString::from_nsstring(&NSString::from_str(&plain));
             let full = NSRange::new(0, plain.encode_utf16().count());
             unsafe {
@@ -299,6 +306,13 @@ mod ui {
                         NSRange::new(loc, 1),
                     );
                 }
+                if let Some(loc) = alert_loc {
+                    attr.addAttribute_value_range(
+                        NSForegroundColorAttributeName,
+                        &NSColor::systemRedColor(),
+                        NSRange::new(loc, 2),
+                    );
+                }
                 button.setAttributedTitle(&attr);
             }
         }
@@ -308,7 +322,10 @@ mod ui {
             let now = state::now_epoch();
             let states = state::load_all();
             let snap = bar::build_snapshot(states.clone(), now);
-            self.set_title_segments(&bar::title_segments(&snap));
+            let alert = usage::load()
+                .map(|u| bar::usage_alert(&u, config::load().usage_alert_pct))
+                .unwrap_or(false);
+            self.set_title_segments(&bar::title_segments(&snap), alert);
 
             if !self.ivars().menu_open.get() {
                 return;
@@ -392,6 +409,8 @@ mod ui {
             }
 
             menu.addItem(&NSMenuItem::separatorItem(mtm));
+            self.add_usage_section(menu, now);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
             self.add_history_submenu(menu, now);
             self.add_sound_submenu(menu);
             menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -416,6 +435,20 @@ mod ui {
             menu.addItem(&quit);
 
             *self.ivars().actions.borrow_mut() = actions;
+        }
+
+        /// Claude Code usage from the statusLine capture (official numbers).
+        fn add_usage_section(&self, menu: &NSMenu, now: u64) {
+            let mtm = self.mtm();
+            menu.addItem(&section_header(mtm, "Usage"));
+            let lines = usage::load().map(|u| bar::usage_lines(&u, now)).unwrap_or_default();
+            if lines.is_empty() {
+                menu.addItem(&disabled_item(mtm, "no data yet — run a Claude Code turn"));
+                return;
+            }
+            for line in lines {
+                menu.addItem(&disabled_item(mtm, &line));
+            }
         }
 
         /// Completion-sound picker; the choice persists to config.toml.

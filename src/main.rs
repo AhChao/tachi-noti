@@ -22,6 +22,12 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = Scope::User)]
         scope: Scope,
     },
+    /// statusLine pipeline stage: capture usage, pass stdin to --chain (used by settings)
+    #[command(hide = true)]
+    Statusline {
+        #[arg(long)]
+        chain: Option<String>,
+    },
     /// Show recent notification history
     Log {
         #[arg(short = 'n', long, default_value_t = 20)]
@@ -47,6 +53,9 @@ fn main() {
         }
         Cmd::Install { scope } => exit_on_err(settings::install(scope)),
         Cmd::Uninstall { scope } => exit_on_err(settings::uninstall(scope)),
+        Cmd::Statusline { chain } => {
+            std::process::exit(tachi_noti::usage::run_statusline(chain.as_deref()));
+        }
         Cmd::Log { lines } => tachi_noti::history::print_log(lines),
         Cmd::Test => exit_on_err(hook::run_test()),
         Cmd::Doctor => exit_on_err(hook::run_doctor()),

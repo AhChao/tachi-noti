@@ -28,19 +28,74 @@ fn settings_path(scope: Scope) -> Result<PathBuf> {
     })
 }
 
-fn hook_command() -> String {
+/// Absolute binary path, shell-quoted if it needs it.
+fn exe_for_shell() -> String {
     std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map(|p| {
             let path = p.display().to_string();
-            // Hook commands run through a shell; quote paths that need it.
             if path.contains(' ') || path.contains('\'') || path.contains('"') {
-                format!("'{}' hook", path.replace('\'', "'\\''"))
+                crate::notify::sh_quote(&path)
             } else {
-                format!("{path} hook")
+                path
             }
         })
-        .unwrap_or_else(|_| "tachi-noti hook".to_string())
+        .unwrap_or_else(|_| "tachi-noti".to_string())
+}
+
+fn hook_command() -> String {
+    format!("{} hook", exe_for_shell())
+}
+
+fn is_our_statusline(cmd: &str) -> bool {
+    cmd.contains("tachi-noti") && cmd.contains(" statusline")
+}
+
+/// Put usage capture at the front of the statusLine pipeline. Only the
+/// `command` string is touched — type/padding/refreshInterval stay put.
+/// Returns a description of the change, None when nothing was done.
+pub fn wrap_statusline(root: &mut Value, exe: &str) -> Option<String> {
+    if !root.is_object() {
+        return None;
+    }
+    match root.get_mut("statusLine") {
+        None => {
+            root["statusLine"] = json!({
+                "type": "command",
+                "command": format!("{exe} statusline"),
+            });
+            Some("statusLine set to capture usage".to_string())
+        }
+        Some(sl) => {
+            let cmd = sl.get("command").and_then(|c| c.as_str())?.to_string();
+            if is_our_statusline(&cmd) {
+                return None;
+            }
+            sl["command"] = json!(format!("{exe} statusline --chain {}", crate::notify::sh_quote(&cmd)));
+            Some(format!("statusLine wrapped (your '{cmd}' still renders the line)"))
+        }
+    }
+}
+
+/// Undo wrap_statusline. None = nothing of ours found (or unrecognizable —
+/// in that case we leave the user's edits alone).
+pub fn unwrap_statusline(root: &mut Value) -> Option<String> {
+    let sl = root.get_mut("statusLine")?;
+    let cmd = sl.get("command").and_then(|c| c.as_str())?.to_string();
+    if !is_our_statusline(&cmd) {
+        return None;
+    }
+    match cmd.split_once("--chain ") {
+        Some((_, quoted)) => {
+            let original = crate::notify::sh_unquote(quoted)?;
+            sl["command"] = json!(original);
+            Some(format!("statusLine restored to '{original}'"))
+        }
+        None => {
+            root.as_object_mut()?.remove("statusLine");
+            Some("statusLine removed (we had created it)".to_string())
+        }
+    }
 }
 
 fn is_ours(group: &Value) -> bool {
@@ -157,18 +212,24 @@ pub fn install(scope: Scope) -> Result<()> {
     let mut root = read_settings(&path)?;
     let command = hook_command();
     let added = merge_install(&mut root, &command)?;
-    if added.is_empty() {
+    let statusline_change = wrap_statusline(&mut root, &exe_for_shell());
+    if added.is_empty() && statusline_change.is_none() {
         println!("Already installed in {} — nothing to do.", path.display());
         return Ok(());
     }
     let bak = backup(&path)?;
     write_atomic(&path, &root)?;
-    println!("Installed hooks ({}) into {}", added.join(", "), path.display());
-    println!("  command: {command}");
+    if !added.is_empty() {
+        println!("Installed hooks ({}) into {}", added.join(", "), path.display());
+        println!("  command: {command}");
+    }
+    if let Some(s) = statusline_change {
+        println!("  {s}");
+    }
     if let Some(b) = bak {
         println!("  backup:  {}", b.display());
     }
-    println!("Restart your Claude Code session to pick up the hooks.");
+    println!("Restart your Claude Code session to pick up the changes.");
     Ok(())
 }
 
@@ -180,13 +241,19 @@ pub fn uninstall(scope: Scope) -> Result<()> {
     }
     let mut root = read_settings(&path)?;
     let removed = merge_uninstall(&mut root);
-    if removed.is_empty() {
+    let statusline_change = unwrap_statusline(&mut root);
+    if removed.is_empty() && statusline_change.is_none() {
         println!("No tachi-noti hooks found in {} — nothing to do.", path.display());
         return Ok(());
     }
     let bak = backup(&path)?;
     write_atomic(&path, &root)?;
-    println!("Removed hooks ({}) from {}", removed.join(", "), path.display());
+    if !removed.is_empty() {
+        println!("Removed hooks ({}) from {}", removed.join(", "), path.display());
+    }
+    if let Some(s) = statusline_change {
+        println!("  {s}");
+    }
     if let Some(b) = bak {
         println!("  backup: {}", b.display());
     }
@@ -329,6 +396,52 @@ mod tests {
         assert_eq!(added, vec!["SessionStart", "SessionEnd", "PostToolUse", "PermissionRequest", "PreToolUse"]);
         assert_eq!(root["hooks"]["Stop"].as_array().unwrap().len(), 1, "old group untouched");
         assert_eq!(root["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion");
+    }
+
+    #[test]
+    fn statusline_wrap_and_unwrap_roundtrip() {
+        let exe = "/usr/local/bin/tachi-noti";
+        // Existing foreign statusline with extra fields.
+        let mut root = json!({
+            "statusLine": {
+                "type": "command",
+                "command": "/Users/x/my scripts/buddy's-status.sh",
+                "padding": 1,
+                "refreshInterval": 1
+            }
+        });
+        let change = wrap_statusline(&mut root, exe);
+        assert!(change.is_some());
+        let wrapped = root["statusLine"]["command"].as_str().unwrap().to_string();
+        assert!(wrapped.starts_with("/usr/local/bin/tachi-noti statusline --chain "), "{wrapped}");
+        assert_eq!(root["statusLine"]["padding"], 1, "other fields untouched");
+        assert_eq!(root["statusLine"]["refreshInterval"], 1);
+        // Idempotent.
+        assert!(wrap_statusline(&mut root, exe).is_none());
+        // Unwrap restores the original (quote-containing path survives).
+        let change = unwrap_statusline(&mut root);
+        assert!(change.is_some());
+        assert_eq!(root["statusLine"]["command"], "/Users/x/my scripts/buddy's-status.sh");
+        assert_eq!(root["statusLine"]["padding"], 1);
+        // Nothing of ours left → second unwrap is a no-op.
+        assert!(unwrap_statusline(&mut root).is_none());
+    }
+
+    #[test]
+    fn statusline_created_and_removed_when_absent_before() {
+        let exe = "/usr/local/bin/tachi-noti";
+        let mut root = json!({});
+        wrap_statusline(&mut root, exe).unwrap();
+        assert_eq!(root["statusLine"]["command"], "/usr/local/bin/tachi-noti statusline");
+        unwrap_statusline(&mut root).unwrap();
+        assert!(root.get("statusLine").is_none(), "we created it, we remove it");
+    }
+
+    #[test]
+    fn foreign_statusline_untouched_by_unwrap() {
+        let mut root = json!({"statusLine": {"type": "command", "command": "some-other-tool line"}});
+        assert!(unwrap_statusline(&mut root).is_none());
+        assert_eq!(root["statusLine"]["command"], "some-other-tool line");
     }
 
     #[test]

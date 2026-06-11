@@ -156,6 +156,52 @@ pub fn title_segments(s: &Snapshot) -> Vec<(usize, Status)> {
     parts
 }
 
+/// Menu lines for the Usage section, from the statusLine-captured snapshot.
+pub fn usage_lines(u: &crate::usage::Usage, now: u64) -> Vec<String> {
+    let line = |label: &str, w: crate::usage::Window| {
+        let reset = if w.resets_at > now {
+            format!("resets in {}", until(now, w.resets_at))
+        } else {
+            // The window boundary already passed and nothing fresher arrived.
+            "stale".to_string()
+        };
+        format!("{label}{:>3.0}% \u{00B7} {reset}", w.used_percentage)
+    };
+    let mut lines = Vec::new();
+    if let Some(w) = u.five_hour {
+        lines.push(line("5h window   ", w));
+    }
+    if let Some(w) = u.seven_day {
+        lines.push(line("Week         ", w));
+    }
+    if !lines.is_empty() {
+        lines.push(format!("updated {}", crate::history::rel_time(now, u.updated_at)));
+    }
+    lines
+}
+
+fn until(now: u64, ts: u64) -> String {
+    let Some(d) = ts.checked_sub(now).filter(|d| *d > 0) else { return "now".into() };
+    if d < 3600 {
+        format!("{}m", d / 60)
+    } else if d < 24 * 3600 {
+        format!("{}h{:02}m", d / 3600, (d % 3600) / 60)
+    } else {
+        format!("{}d{}h", d / (24 * 3600), (d % (24 * 3600)) / 3600)
+    }
+}
+
+/// True when any usage window is at or above the warning threshold (0 = off).
+pub fn usage_alert(u: &crate::usage::Usage, threshold_pct: u8) -> bool {
+    if threshold_pct == 0 {
+        return false;
+    }
+    [u.five_hour, u.seven_day]
+        .iter()
+        .flatten()
+        .any(|w| w.used_percentage >= threshold_pct as f64)
+}
+
 /// Choices for the completion-sound picker: Tachi's bark, the system sounds,
 /// and silence. Returns (label, config value) pairs.
 pub fn sound_options() -> Vec<(String, String)> {
@@ -303,6 +349,27 @@ mod tests {
         s.waiting = Some(WaitingInfo { kind: WaitKind::Question, detail: None });
         let snap = build_snapshot(vec![s], 160);
         assert!(snap.groups[0].rows[0].label.starts_with("question?"));
+    }
+
+    #[test]
+    fn usage_lines_and_alert() {
+        use crate::usage::{Usage, Window};
+        let u = Usage {
+            five_hour: Some(Window { used_percentage: 37.4, resets_at: 10_000 }),
+            seven_day: Some(Window { used_percentage: 81.0, resets_at: 200_000 }),
+            updated_at: 1_000,
+        };
+        let lines = usage_lines(&u, 1_180);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("37%") && lines[0].contains("resets in 2h27m"), "{}", lines[0]);
+        assert!(lines[1].contains("81%") && lines[1].contains("resets in 2d7h"), "{}", lines[1]);
+        assert!(lines[2].starts_with("updated 3m ago"), "{}", lines[2]);
+        assert!(usage_alert(&u, 80), "81% crosses the 80 threshold");
+        assert!(!usage_alert(&u, 90));
+        assert!(!usage_alert(&u, 0), "0 disables");
+        let empty = Usage::default();
+        assert!(usage_lines(&empty, 0).is_empty());
+        assert!(!usage_alert(&empty, 80));
     }
 
     #[test]

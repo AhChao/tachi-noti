@@ -354,6 +354,21 @@ pub fn run_doctor() -> Result<()> {
     let hp = history::history_path();
     let size = std::fs::metadata(&hp).map(|m| m.len()).unwrap_or(0);
     println!("history:          {} ({} entries, {} KB)", hp.display(), history::entry_count(), size / 1024);
+    match crate::usage::load() {
+        Some(u) => {
+            let now = state::now_epoch();
+            let pct = |w: Option<crate::usage::Window>| {
+                w.map(|w| format!("{:.0}%", w.used_percentage)).unwrap_or_else(|| "—".into())
+            };
+            println!(
+                "usage:            5h {} / week {} (updated {})",
+                pct(u.five_hour),
+                pct(u.seven_day),
+                history::rel_time(now, u.updated_at)
+            );
+        }
+        None => println!("usage:            (no data — statusLine capture hasn't run yet)"),
+    }
     Ok(())
 }
 

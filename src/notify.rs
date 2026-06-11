@@ -191,6 +191,15 @@ pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Inverse of sh_quote — only accepts strings in exactly that format.
+pub fn sh_unquote(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.len() < 2 || !s.starts_with('\'') || !s.ends_with('\'') {
+        return None;
+    }
+    Some(s[1..s.len() - 1].replace("'\\''", "'"))
+}
+
 /// terminal-notifier misparses messages starting with '-' or '[' as flags;
 /// a zero-width space neutralizes that without visible change.
 pub fn guard_leading_dash(body: &str) -> String {
