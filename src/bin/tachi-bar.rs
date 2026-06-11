@@ -22,8 +22,34 @@ fn main() {
     match Cli::parse().cmd {
         Some(Cmd::InstallAgent) => agent::install(),
         Some(Cmd::UninstallAgent) => agent::uninstall(),
-        None => ui::run(),
+        None => {
+            // Single instance: a manual launch racing the launchd agent (its
+            // KeepAlive respawns on kill) must not stack a second status item.
+            // Exiting 0 keeps launchd's KeepAlive=SuccessfulExit:false from
+            // respawn-looping the loser.
+            let Some(_lock) = acquire_single_instance_lock() else {
+                eprintln!("tachi-bar is already running — exiting.");
+                return;
+            };
+            ui::run(); // never returns; the lock lives as long as the process
+        }
     }
+}
+
+/// Exclusive advisory lock; the returned file must stay alive for the
+/// process lifetime.
+fn acquire_single_instance_lock() -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let dir = tachi_noti::state::data_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join("tachi-bar.lock"))
+        .ok()?;
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 { Some(f) } else { None }
 }
 
 mod agent {
