@@ -14,7 +14,7 @@ His portrait rides along inside the binary, so every notification arrives with h
 
 ## What he announces
 
-- **Task complete** (`Stop`) — repo name, `repo @ branch` subtitle, Claude's last reply (truncated), elapsed time, Glass sound.
+- **Task complete** (`Stop`) — repo name, `repo @ branch` subtitle, Claude's last reply (truncated), elapsed time, with a sound of your choosing — including **Tachi's own woof** (embedded in the binary, auto-installed to `~/Library/Sounds/TachiBark.aiff`). Pick it from the tachi-bar menu (Notification Sound) or set it in config.
 - **Needs your input** (`Notification`: permission prompt / idle) — the prompt message, Basso sound, so you can tell "done" from "waiting" by ear.
 - **Focus suppression** — no notification when the terminal/IDE hosting the session is already frontmost. (A butler doesn't announce guests you're already talking to.)
 - **Click-to-focus** — clicking the notification activates the right app (requires `terminal-notifier`). For VS Code-family apps (VS Code, Cursor, Antigravity, Windsurf, …) it focuses the exact window that has the session's project folder open, even with multiple windows of the same app.
@@ -28,7 +28,7 @@ His portrait rides along inside the binary, so every notification arrives with h
 - Yellow rows say **what** they're blocked on: `plan ready?` (ExitPlanMode approval), `question?` (AskUserQuestion), `permission · <command>` (the exact command inline, full text on hover). Permission detection uses the `PermissionRequest` hook (fires only when a dialog actually appears, so auto-allowed tools never show as waiting).
 - The menu bar shows a dog symbol with an at-a-glance count like `🐕 ●1 ●2` (waiting first — it needs you); just the dog when all is calm. Stale "running" sessions that died without cleanup are demoted automatically so the counts stay honest.
 - **Click a session to jump to its exact IDE window** (same window-precise focus as the notifications).
-- A "Recent notifications" submenu (last 5), a Launch-at-Login toggle, and nothing else.
+- A "Recent notifications" submenu (last 5), a **Notification Sound picker** (Tachi's bark, every system sound, or silent — plays a preview on selection and persists to config), a Launch-at-Login toggle, and nothing else.
 
 No daemon, no IPC: the hooks write tiny per-session state files under `~/Library/Application Support/tachi-noti/state/`, and the bar re-reads them every 2 seconds.
 
@@ -67,7 +67,9 @@ max_body_len = 120         # truncate notification body to this many chars
 # icon = "/path/to.png"    # notification image; unset = Tachi's portrait, "" = none
 
 [sounds]
-stop = "Glass"             # "" = silent; names from /System/Library/Sounds
+stop = "Glass"             # completion sound: "TachiBark" = Tachi's woof,
+                           # "" = silent, or any name from /System/Library/Sounds.
+                           # Also settable from the tachi-bar menu (with preview).
 attention = "Basso"
 ```
 

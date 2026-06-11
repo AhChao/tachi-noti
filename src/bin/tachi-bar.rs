@@ -135,7 +135,7 @@ mod ui {
     };
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
-    use tachi_noti::{bar, history, state};
+    use tachi_noti::{bar, config, history, notify, state};
 
     /// Click target for a menu row, kept session-identified so live label
     /// updates can never attach to the wrong row.
@@ -151,6 +151,8 @@ mod ui {
         status_item: RefCell<Option<Retained<NSStatusItem>>>,
         menu: RefCell<Option<Retained<NSMenu>>>,
         actions: RefCell<Vec<Action>>,
+        /// Config values for the sound picker, indexed by menu item tag.
+        sound_values: RefCell<Vec<String>>,
         menu_open: Cell<bool>,
     }
 
@@ -184,6 +186,23 @@ mod ui {
                 if agent::is_installed() { agent::uninstall() } else { agent::install() }
             }
 
+            #[unsafe(method(selectSound:))]
+            fn select_sound(&self, sender: &NSMenuItem) {
+                let idx = sender.tag() as usize;
+                let Some(value) = self.ivars().sound_values.borrow().get(idx).cloned() else { return };
+                if let Err(e) = config::set_stop_sound(&value) {
+                    eprintln!("tachi-bar: cannot save sound choice: {e}");
+                    return;
+                }
+                if value == notify::BARK_SOUND_NAME {
+                    notify::ensure_bark_sound();
+                }
+                // Audible feedback so the pick can be judged on the spot.
+                if let Some(path) = bar::sound_preview_path(&value) {
+                    let _ = std::process::Command::new("/usr/bin/afplay").arg(path).spawn();
+                }
+            }
+
             #[unsafe(method(quit:))]
             fn quit(&self, _sender: &NSMenuItem) {
                 NSApplication::sharedApplication(self.mtm()).terminate(None);
@@ -214,6 +233,7 @@ mod ui {
                 status_item: RefCell::new(None),
                 menu: RefCell::new(None),
                 actions: RefCell::new(Vec::new()),
+                sound_values: RefCell::new(Vec::new()),
                 menu_open: Cell::new(false),
             });
             unsafe { msg_send![super(this), init] }
@@ -347,6 +367,7 @@ mod ui {
 
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             self.add_history_submenu(menu, now);
+            self.add_sound_submenu(menu);
             menu.addItem(&NSMenuItem::separatorItem(mtm));
 
             let login = NSMenuItem::new(mtm);
@@ -369,6 +390,33 @@ mod ui {
             menu.addItem(&quit);
 
             *self.ivars().actions.borrow_mut() = actions;
+        }
+
+        /// Completion-sound picker; the choice persists to config.toml.
+        fn add_sound_submenu(&self, menu: &NSMenu) {
+            let mtm = self.mtm();
+            let current = config::load().sounds.stop;
+            let parent = NSMenuItem::new(mtm);
+            parent.setTitle(&NSString::from_str("Notification Sound"));
+            let sub = NSMenu::new(mtm);
+            sub.setAutoenablesItems(false);
+            let mut values = Vec::new();
+            for (label, value) in bar::sound_options() {
+                let item = NSMenuItem::new(mtm);
+                item.setTitle(&NSString::from_str(&label));
+                let target: &AnyObject = self;
+                unsafe {
+                    item.setTarget(Some(target));
+                    item.setAction(Some(sel!(selectSound:)));
+                }
+                item.setTag(values.len() as isize);
+                item.setState(if value == current { NSControlStateValueOn } else { NSControlStateValueOff });
+                sub.addItem(&item);
+                values.push(value);
+            }
+            parent.setSubmenu(Some(&sub));
+            menu.addItem(&parent);
+            *self.ivars().sound_values.borrow_mut() = values;
         }
 
         fn add_history_submenu(&self, menu: &NSMenu, now: u64) {

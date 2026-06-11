@@ -156,6 +156,39 @@ pub fn title_segments(s: &Snapshot) -> Vec<(usize, Status)> {
     parts
 }
 
+/// Choices for the completion-sound picker: Tachi's bark, the system sounds,
+/// and silence. Returns (label, config value) pairs.
+pub fn sound_options() -> Vec<(String, String)> {
+    let mut opts = vec![("Tachi Bark".to_string(), "TachiBark".to_string())];
+    let mut system: Vec<String> = std::fs::read_dir("/System/Library/Sounds")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.strip_suffix(".aiff").map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    system.sort();
+    opts.extend(system.into_iter().map(|n| (n.clone(), n)));
+    opts.push(("Silent".to_string(), String::new()));
+    opts
+}
+
+/// Resolve a sound value to a playable file for the in-menu preview.
+pub fn sound_preview_path(value: &str) -> Option<std::path::PathBuf> {
+    if value.is_empty() {
+        return None;
+    }
+    let candidates = [
+        dirs::home_dir()?.join(format!("Library/Sounds/{value}.aiff")),
+        std::path::PathBuf::from(format!("/System/Library/Sounds/{value}.aiff")),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
 /// Focus the window hosting a session. VS Code-family apps get the folder path
 /// (window-precise); other apps a plain activation. argv-only, no shell.
 pub fn focus(bundle_id: &str, open_path: Option<&str>) {
