@@ -41,10 +41,7 @@ pub fn run() -> Result<()> {
         }
         "Stop" => on_stop(&input, &cfg, &ctx),
         "Notification" => on_notification(&input, &cfg, &ctx),
-        "PermissionRequest" => {
-            transition(&ctx, state::Event::Waiting(permission_wait_info(&input)));
-            Ok(())
-        }
+        "PermissionRequest" => on_permission_request(&input, &cfg, &ctx),
         "PreToolUse" => on_pre_tool_use(&input, &cfg, &ctx),
         "PostToolUse" => {
             transition(&ctx, state::Event::PostToolUse { tool_name: input.tool_name.as_deref() });
@@ -76,20 +73,35 @@ fn build_ctx(input: &HookInput) -> state::Ctx {
     }
 }
 
-fn transition(ctx: &state::Ctx, ev: state::Event) -> state::Transition {
+/// One popup per dialog regardless of which event lands first: a session
+/// already Waiting within this window was just announced.
+const DEDUP_WINDOW_SECS: u64 = 10;
+
+struct Applied {
+    transition: state::Transition,
+    /// The session was already in a fresh Waiting state before this event.
+    was_recently_waiting: bool,
+}
+
+fn transition(ctx: &state::Ctx, ev: state::Event) -> Applied {
     let prev = state::load(&ctx.session_id);
     let age = state::file_age_secs(&ctx.session_id);
-    let t = state::apply_event(prev, ctx, ev, state::now_epoch(), age);
+    let now = state::now_epoch();
+    let was_recently_waiting = prev
+        .as_ref()
+        .map(|p| p.status == state::Status::Waiting && now.saturating_sub(p.last_event_at) <= DEDUP_WINDOW_SECS)
+        .unwrap_or(false);
+    let t = state::apply_event(prev, ctx, ev, now, age);
     if let Some(s) = &t.save {
         state::save(s);
     }
-    t
+    Applied { transition: t, was_recently_waiting }
 }
 
 fn on_stop(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<()> {
     // State first: the transition must happen even if the popup is suppressed.
     let t = transition(ctx, state::Event::Stop);
-    let duration = t.task_duration;
+    let duration = t.transition.task_duration;
 
     if cfg.min_duration_secs > 0 {
         // Only suppress when we positively know the turn was quick.
@@ -137,7 +149,12 @@ fn on_notification(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
         Some(_) => return Ok(()),
     };
     // State first: suppressing the popup must not suppress the Waiting state.
-    transition(ctx, state::Event::Waiting(info));
+    // Notification is the legacy fallback source — it must not overwrite the
+    // richer PermissionRequest detail, nor re-announce the same dialog.
+    let applied = transition(ctx, state::Event::Waiting { info, authoritative: false });
+    if applied.was_recently_waiting {
+        return Ok(());
+    }
 
     if cfg.focus_suppression && focus::session_is_frontmost() {
         return Ok(());
@@ -152,6 +169,35 @@ fn on_notification(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
     let notice = build_notice(cfg, ctx, body, &cfg.sounds.attention);
     notify::send(&notify::detect(cfg), &notice)?;
     record_history("notification", ctx, &notice.body);
+    Ok(())
+}
+
+/// Primary permission signal: fires only when a dialog actually appears, so
+/// auto-allowed tools (allowlist, acceptEdits, auto mode) can never produce a
+/// false alert. Also the only voice plan approval has when Notification stays
+/// silent for it.
+fn on_permission_request(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<()> {
+    let info = permission_wait_info(input);
+    let kind = info.kind;
+    let detail = info.detail.clone();
+    let applied = transition(ctx, state::Event::Waiting { info, authoritative: true });
+    if applied.was_recently_waiting {
+        return Ok(()); // the fallback Notification already announced this dialog
+    }
+
+    if cfg.focus_suppression && focus::session_is_frontmost() {
+        return Ok(());
+    }
+    let body = match kind {
+        state::WaitKind::Plan => "Plan ready — waiting for your approval".to_string(),
+        _ => detail
+            .map(|d| format!("Permission: {d}"))
+            .unwrap_or_else(|| "Claude needs your permission".to_string()),
+    };
+    let body = transcript::squash(&body, cfg.max_body_len);
+    let notice = build_notice(cfg, ctx, body, &cfg.sounds.attention);
+    notify::send(&notify::detect(cfg), &notice)?;
+    record_history("permission", ctx, &notice.body);
     Ok(())
 }
 
@@ -185,7 +231,10 @@ fn on_pre_tool_use(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
         .and_then(|v| v["questions"][0]["question"].as_str())
         .map(str::to_string);
     let info = state::WaitingInfo { kind: state::WaitKind::Question, detail: question.clone() };
-    transition(ctx, state::Event::Waiting(info));
+    let applied = transition(ctx, state::Event::Waiting { info, authoritative: true });
+    if applied.was_recently_waiting {
+        return Ok(());
+    }
 
     if cfg.focus_suppression && focus::session_is_frontmost() {
         return Ok(());

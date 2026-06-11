@@ -85,7 +85,9 @@ pub enum Event<'a> {
     SessionStart { source: Option<&'a str> },
     PromptSubmit,
     Stop,
-    Waiting(WaitingInfo),
+    /// `authoritative` = structured source (PermissionRequest/PreToolUse) that
+    /// may overwrite an equal-rank detail; the generic Notification may not.
+    Waiting { info: WaitingInfo, authoritative: bool },
     PostToolUse { tool_name: Option<&'a str> },
 }
 
@@ -163,15 +165,18 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
             s.task_started_at = None;
             Transition { save: Some(s), task_duration: duration }
         }
-        Event::Waiting(info) => {
+        Event::Waiting { info, authoritative } => {
             // Keep task_started_at — the task is still in flight.
             let mut s = set_status(prev.map(carry).unwrap_or_else(|| fresh(Status::Waiting)), Status::Waiting);
             // Upgrade, never downgrade: a weaker signal (e.g. the generic
             // Notification message) must not clobber a richer one (e.g. the
-            // exact command from PermissionRequest).
+            // exact command from PermissionRequest). An authoritative source
+            // may replace an equal-rank detail even if it arrived second.
             s.waiting = match s.waiting.take() {
                 Some(old) if old.kind.rank() > info.kind.rank() => Some(old),
-                Some(old) if old.kind.rank() == info.kind.rank() && old.detail.is_some() => Some(old),
+                Some(old) if old.kind.rank() == info.kind.rank() && !authoritative && old.detail.is_some() => {
+                    Some(old)
+                }
                 _ => Some(info),
             };
             Transition { save: Some(s), task_duration: None }
@@ -324,7 +329,7 @@ mod tests {
         assert_eq!(s.task_started_at, Some(110));
         assert_eq!(s.status_since, 110);
 
-        let t = apply_event(Some(s), &c, Event::Waiting(wait(WaitKind::Permission, Some("cargo test"))), 150, Some(0));
+        let t = apply_event(Some(s), &c, waiting(WaitKind::Permission, Some("cargo test")), 150, Some(0));
         let s = t.save.unwrap();
         assert_eq!(s.status, Status::Waiting);
         assert_eq!(s.task_started_at, Some(110), "waiting keeps the task in flight");
@@ -377,17 +382,27 @@ mod tests {
         WaitingInfo { kind, detail: detail.map(str::to_string) }
     }
 
+    /// Weak (Notification-style) waiting event.
+    fn waiting(kind: WaitKind, detail: Option<&str>) -> Event<'static> {
+        Event::Waiting { info: wait(kind, detail), authoritative: false }
+    }
+
+    /// Strong (PermissionRequest/PreToolUse-style) waiting event.
+    fn waiting_auth(kind: WaitKind, detail: Option<&str>) -> Event<'static> {
+        Event::Waiting { info: wait(kind, detail), authoritative: true }
+    }
+
     #[test]
     fn weaker_signal_never_downgrades_waiting() {
         let c = ctx("s6");
-        let s = apply_event(None, &c, Event::Waiting(wait(WaitKind::Permission, Some("rm -rf target"))), 100, None)
+        let s = apply_event(None, &c, waiting_auth(WaitKind::Permission, Some("rm -rf target")), 100, None)
             .save
             .unwrap();
         // Generic Notification arrives after the rich PermissionRequest.
         let s = apply_event(
             Some(s),
             &c,
-            Event::Waiting(wait(WaitKind::Permission, Some("Claude needs your permission"))),
+            waiting(WaitKind::Permission, Some("Claude needs your permission")),
             101,
             Some(0),
         )
@@ -395,15 +410,29 @@ mod tests {
         .unwrap();
         assert_eq!(s.waiting.as_ref().unwrap().detail.as_deref(), Some("rm -rf target"));
         // Idle signal must not clobber a plan wait.
-        let s = apply_event(Some(s), &c, Event::Waiting(wait(WaitKind::Plan, None)), 102, Some(0)).save.unwrap();
-        let s = apply_event(Some(s), &c, Event::Waiting(wait(WaitKind::Idle, None)), 103, Some(0)).save.unwrap();
+        let s = apply_event(Some(s), &c, waiting_auth(WaitKind::Plan, None), 102, Some(0)).save.unwrap();
+        let s = apply_event(Some(s), &c, waiting(WaitKind::Idle, None), 103, Some(0)).save.unwrap();
         assert_eq!(s.waiting.as_ref().unwrap().kind, WaitKind::Plan);
+    }
+
+    #[test]
+    fn authoritative_signal_upgrades_equal_rank_detail() {
+        let c = ctx("s8");
+        // Fallback Notification lands first with the generic message…
+        let s = apply_event(None, &c, waiting(WaitKind::Permission, Some("Claude needs your permission")), 100, None)
+            .save
+            .unwrap();
+        // …then PermissionRequest arrives with the structured command.
+        let s = apply_event(Some(s), &c, waiting_auth(WaitKind::Permission, Some("rm -rf target")), 101, Some(0))
+            .save
+            .unwrap();
+        assert_eq!(s.waiting.as_ref().unwrap().detail.as_deref(), Some("rm -rf target"));
     }
 
     #[test]
     fn plan_wait_survives_unrelated_tool_results() {
         let c = ctx("s7");
-        let s = apply_event(None, &c, Event::Waiting(wait(WaitKind::Plan, None)), 100, None).save.unwrap();
+        let s = apply_event(None, &c, waiting_auth(WaitKind::Plan, None), 100, None).save.unwrap();
         // A parallel subagent's Bash result must not clear the plan-approval wait.
         let s = apply_event(Some(s), &c, Event::PostToolUse { tool_name: Some("Bash") }, 110, Some(0)).save.unwrap();
         assert_eq!(s.status, Status::Waiting);
