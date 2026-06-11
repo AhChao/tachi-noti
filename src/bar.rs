@@ -139,9 +139,9 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
     }
 }
 
-/// Title segments next to the dog icon: waiting and running dominate; the idle
-/// count only shows when nothing is active, so the title stays narrow when it
-/// matters. Empty = all quiet, the dog stands alone.
+/// Title segments next to the dog icon, ordered by urgency: waiting (needs
+/// you), running, idle (free capacity — visible so spare sessions register at
+/// a glance). Empty = no sessions, the dog stands alone.
 pub fn title_segments(s: &Snapshot) -> Vec<(usize, Status)> {
     let mut parts = Vec::new();
     if s.waiting > 0 {
@@ -150,7 +150,7 @@ pub fn title_segments(s: &Snapshot) -> Vec<(usize, Status)> {
     if s.running > 0 {
         parts.push((s.running, Status::Running));
     }
-    if parts.is_empty() && s.idle > 0 {
+    if s.idle > 0 {
         parts.push((s.idle, Status::Idle));
     }
     parts
@@ -308,13 +308,17 @@ mod tests {
     #[test]
     fn title_summarizes() {
         let mk = |w, r, i| Snapshot { groups: vec![], running: r, waiting: w, idle: i };
-        assert!(title_segments(&mk(0, 0, 0)).is_empty(), "all quiet: dog stands alone");
-        assert_eq!(title_segments(&mk(0, 0, 3)), vec![(3, Status::Idle)], "idle-only shows a count");
-        assert_eq!(title_segments(&mk(0, 2, 5)), vec![(2, Status::Running)], "idle hidden when active");
+        assert!(title_segments(&mk(0, 0, 0)).is_empty(), "no sessions: dog stands alone");
+        assert_eq!(title_segments(&mk(0, 0, 3)), vec![(3, Status::Idle)]);
+        assert_eq!(
+            title_segments(&mk(0, 2, 5)),
+            vec![(2, Status::Running), (5, Status::Idle)],
+            "idle always visible — it's usable capacity"
+        );
         assert_eq!(title_segments(&mk(1, 0, 0)), vec![(1, Status::Waiting)]);
         assert_eq!(
-            title_segments(&mk(1, 2, 0)),
-            vec![(1, Status::Waiting), (2, Status::Running)],
+            title_segments(&mk(1, 2, 4)),
+            vec![(1, Status::Waiting), (2, Status::Running), (4, Status::Idle)],
             "waiting leads — it needs the user"
         );
     }
