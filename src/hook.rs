@@ -334,6 +334,15 @@ pub fn run_doctor() -> Result<()> {
         "sounds:           stop={} attention={}  focus_suppression={}  min_duration={}s",
         cfg.sounds.stop, cfg.sounds.attention, cfg.focus_suppression, cfg.min_duration_secs
     );
+    // A named sound without a backing file makes macOS play its default
+    // sound instead — the classic "why is my sound setting ignored".
+    for (which, name) in [("stop", cfg.sounds.stop.as_str()), ("attention", cfg.sounds.attention.as_str())] {
+        if !name.is_empty() && crate::bar::sound_preview_path(name).is_none() {
+            println!(
+                "                  warning: {which} sound \"{name}\" not found in ~/Library/Sounds or /System/Library/Sounds — macOS will play the default sound"
+            );
+        }
+    }
     for (scope, path) in settings::doctor_paths() {
         if path.exists() {
             let events = settings::installed_events(&path);

@@ -36,6 +36,11 @@ fn main() {
     }
 }
 
+/// A restart successor sets this to outwait its predecessor's instance lock
+/// (released when the old process exits); a plain second launch gives up
+/// immediately.
+const WAIT_LOCK_ENV: &str = "TACHI_BAR_WAIT_LOCK";
+
 /// Exclusive advisory lock; the returned file must stay alive for the
 /// process lifetime.
 fn acquire_single_instance_lock() -> Option<std::fs::File> {
@@ -48,8 +53,39 @@ fn acquire_single_instance_lock() -> Option<std::fs::File> {
         .truncate(false)
         .open(dir.join("tachi-bar.lock"))
         .ok()?;
-    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 { Some(f) } else { None }
+    let attempts = if std::env::var_os(WAIT_LOCK_ENV).is_some() { 50 } else { 1 };
+    for i in 0..attempts {
+        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Some(f);
+        }
+        if i + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    None
+}
+
+/// Replace this process with a fresh one (menu: Restart Tachi Bar).
+/// When launchd manages this very process, kickstart keeps the KeepAlive
+/// crash recovery attached to the successor; otherwise hand over to a
+/// spawned copy that waits for our instance lock.
+fn restart() {
+    if agent::launchd_runs_us() {
+        let status = std::process::Command::new("/bin/launchctl")
+            .args(["kickstart", "-k", &format!("gui/{}/{}", agent::uid(), agent::LABEL)])
+            .status();
+        if status.map(|s| s.success()).unwrap_or(false) {
+            return; // launchd kills and respawns us momentarily
+        }
+    }
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let _ = std::process::Command::new(exe).env(WAIT_LOCK_ENV, "1").spawn();
+            std::process::exit(0); // releases the lock; the successor takes over
+        }
+        Err(e) => eprintln!("tachi-bar: cannot restart (no exe path): {e}"),
+    }
 }
 
 mod agent {
@@ -85,7 +121,7 @@ mod agent {
         )
     }
 
-    fn uid() -> String {
+    pub fn uid() -> String {
         Command::new("/usr/bin/id")
             .arg("-u")
             .output()
@@ -96,6 +132,22 @@ mod agent {
 
     pub fn is_installed() -> bool {
         plist_path().exists()
+    }
+
+    /// True when the loaded launchd service's pid is this very process —
+    /// only then can `launchctl kickstart -k` restart us.
+    pub fn launchd_runs_us() -> bool {
+        let Ok(out) = Command::new("/bin/launchctl")
+            .args(["print", &format!("gui/{}/{LABEL}", uid())])
+            .output()
+        else {
+            return false;
+        };
+        if !out.status.success() {
+            return false;
+        }
+        let needle = format!("pid = {}", std::process::id());
+        String::from_utf8_lossy(&out.stdout).lines().any(|l| l.trim() == needle)
     }
 
     pub fn install() {
@@ -212,21 +264,19 @@ mod ui {
                 if agent::is_installed() { agent::uninstall() } else { agent::install() }
             }
 
-            #[unsafe(method(selectSound:))]
-            fn select_sound(&self, sender: &NSMenuItem) {
-                let idx = sender.tag() as usize;
-                let Some(value) = self.ivars().sound_values.borrow().get(idx).cloned() else { return };
-                if let Err(e) = config::set_stop_sound(&value) {
-                    eprintln!("tachi-bar: cannot save sound choice: {e}");
-                    return;
-                }
-                if value == notify::BARK_SOUND_NAME {
-                    notify::ensure_bark_sound();
-                }
-                // Audible feedback so the pick can be judged on the spot.
-                if let Some(path) = bar::sound_preview_path(&value) {
-                    let _ = std::process::Command::new("/usr/bin/afplay").arg(path).spawn();
-                }
+            #[unsafe(method(selectStopSound:))]
+            fn select_stop_sound(&self, sender: &NSMenuItem) {
+                self.pick_sound(sender, config::set_stop_sound);
+            }
+
+            #[unsafe(method(selectAttentionSound:))]
+            fn select_attention_sound(&self, sender: &NSMenuItem) {
+                self.pick_sound(sender, config::set_attention_sound);
+            }
+
+            #[unsafe(method(restartApp:))]
+            fn restart_app(&self, _sender: &NSMenuItem) {
+                crate::restart();
             }
 
             #[unsafe(method(quit:))]
@@ -425,6 +475,14 @@ mod ui {
             login.setState(if agent::is_installed() { NSControlStateValueOn } else { NSControlStateValueOff });
             menu.addItem(&login);
 
+            let restart = NSMenuItem::new(mtm);
+            restart.setTitle(&NSString::from_str("Restart Tachi Bar"));
+            unsafe {
+                restart.setTarget(Some(target));
+                restart.setAction(Some(sel!(restartApp:)));
+            }
+            menu.addItem(&restart);
+
             let quit = NSMenuItem::new(mtm);
             quit.setTitle(&NSString::from_str("Quit Tachi Bar"));
             unsafe {
@@ -451,31 +509,61 @@ mod ui {
             }
         }
 
-        /// Completion-sound picker; the choice persists to config.toml.
+        /// Persist a picked sound, then play it as audible feedback.
+        fn pick_sound(&self, sender: &NSMenuItem, save: fn(&str) -> Result<(), String>) {
+            let idx = sender.tag() as usize;
+            let Some(value) = self.ivars().sound_values.borrow().get(idx).cloned() else { return };
+            if let Err(e) = save(&value) {
+                eprintln!("tachi-bar: cannot save sound choice: {e}");
+                return;
+            }
+            if value == notify::BARK_SOUND_NAME {
+                notify::ensure_bark_sound();
+            }
+            // Audible feedback so the pick can be judged on the spot.
+            if let Some(path) = bar::sound_preview_path(&value) {
+                let _ = std::process::Command::new("/usr/bin/afplay").arg(path).spawn();
+            }
+        }
+
+        /// Sound pickers; choices persist to config.toml. Completion = Stop
+        /// notifications, Attention = permission / question / plan ones —
+        /// distinct on purpose, so they're tellable apart by ear.
         fn add_sound_submenu(&self, menu: &NSMenu) {
+            let sounds = config::load().sounds;
+            let options = bar::sound_options();
+            self.add_sound_picker(menu, "Completion Sound", &sounds.stop, sel!(selectStopSound:), &options);
+            self.add_sound_picker(menu, "Attention Sound", &sounds.attention, sel!(selectAttentionSound:), &options);
+            *self.ivars().sound_values.borrow_mut() = options.into_iter().map(|(_, v)| v).collect();
+        }
+
+        fn add_sound_picker(
+            &self,
+            menu: &NSMenu,
+            title: &str,
+            current: &str,
+            action: Sel,
+            options: &[(String, String)],
+        ) {
             let mtm = self.mtm();
-            let current = config::load().sounds.stop;
             let parent = NSMenuItem::new(mtm);
-            parent.setTitle(&NSString::from_str("Notification Sound"));
+            parent.setTitle(&NSString::from_str(title));
             let sub = NSMenu::new(mtm);
             sub.setAutoenablesItems(false);
-            let mut values = Vec::new();
-            for (label, value) in bar::sound_options() {
+            for (i, (label, value)) in options.iter().enumerate() {
                 let item = NSMenuItem::new(mtm);
-                item.setTitle(&NSString::from_str(&label));
+                item.setTitle(&NSString::from_str(label));
                 let target: &AnyObject = self;
                 unsafe {
                     item.setTarget(Some(target));
-                    item.setAction(Some(sel!(selectSound:)));
+                    item.setAction(Some(action));
                 }
-                item.setTag(values.len() as isize);
+                item.setTag(i as isize);
                 item.setState(if value == current { NSControlStateValueOn } else { NSControlStateValueOff });
                 sub.addItem(&item);
-                values.push(value);
             }
             parent.setSubmenu(Some(&sub));
             menu.addItem(&parent);
-            *self.ivars().sound_values.borrow_mut() = values;
         }
 
         fn add_history_submenu(&self, menu: &NSMenu, now: u64) {
@@ -596,8 +684,4 @@ mod ui {
 
         app.run();
     }
-
-    // Silence unused warning for Sel import used only in comparisons.
-    #[allow(dead_code)]
-    fn _sel_type(_: Sel) {}
 }

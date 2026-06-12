@@ -202,37 +202,63 @@ pub fn usage_alert(u: &crate::usage::Usage, threshold_pct: u8) -> bool {
         .any(|w| w.used_percentage >= threshold_pct as f64)
 }
 
-/// Choices for the completion-sound picker: Tachi's bark, the system sounds,
-/// and silence. Returns (label, config value) pairs.
-pub fn sound_options() -> Vec<(String, String)> {
-    let mut opts = vec![("Tachi Bark".to_string(), "TachiBark".to_string())];
-    let mut system: Vec<String> = std::fs::read_dir("/System/Library/Sounds")
+/// Extensions macOS resolves for named notification sounds in Library/Sounds.
+const SOUND_EXTS: &[&str] = &["aiff", "aif", "wav", "caf", "m4a", "mp3"];
+
+/// Sound names (basename without extension) found in a Library/Sounds dir.
+fn sound_names_in(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
         .map(|entries| {
             entries
                 .flatten()
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().into_owned();
-                    name.strip_suffix(".aiff").map(str::to_string)
+                    let (stem, ext) = name.rsplit_once('.')?;
+                    SOUND_EXTS.contains(&ext.to_ascii_lowercase().as_str()).then(|| stem.to_string())
                 })
                 .collect()
         })
+        .unwrap_or_default()
+}
+
+/// Choices for the sound pickers: Tachi's bark, the user's own sounds
+/// (~/Library/Sounds), the system sounds, and silence.
+/// Returns (label, config value) pairs.
+pub fn sound_options() -> Vec<(String, String)> {
+    let mut opts = vec![("Tachi Bark".to_string(), "TachiBark".to_string())];
+    let mut user: Vec<String> = dirs::home_dir()
+        .map(|h| sound_names_in(&h.join("Library/Sounds")))
         .unwrap_or_default();
+    user.retain(|n| n != notify::BARK_SOUND_NAME);
+    user.sort();
+    user.dedup();
+    let mut system = sound_names_in(std::path::Path::new("/System/Library/Sounds"));
     system.sort();
+    opts.extend(user.into_iter().map(|n| (n.clone(), n)));
     opts.extend(system.into_iter().map(|n| (n.clone(), n)));
     opts.push(("Silent".to_string(), String::new()));
     opts
 }
 
-/// Resolve a sound value to a playable file for the in-menu preview.
+/// Resolve a sound value to a playable file (in-menu preview, doctor check).
+/// Mirrors macOS's by-name lookup: ~/Library/Sounds first, then the system's.
 pub fn sound_preview_path(value: &str) -> Option<std::path::PathBuf> {
     if value.is_empty() {
         return None;
     }
-    let candidates = [
-        dirs::home_dir()?.join(format!("Library/Sounds/{value}.aiff")),
-        std::path::PathBuf::from(format!("/System/Library/Sounds/{value}.aiff")),
+    let dirs_to_try = [
+        dirs::home_dir().map(|h| h.join("Library/Sounds")),
+        Some(std::path::PathBuf::from("/System/Library/Sounds")),
     ];
-    candidates.into_iter().find(|p| p.exists())
+    for dir in dirs_to_try.into_iter().flatten() {
+        for ext in SOUND_EXTS {
+            let p = dir.join(format!("{value}.{ext}"));
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// Focus the window hosting a session. VS Code-family apps get the folder path
@@ -405,6 +431,19 @@ mod tests {
         assert_eq!(snap.running, 2);
         assert_eq!(snap.waiting, 1);
         assert_eq!(title_segments(&snap), vec![(1, Status::Waiting), (2, Status::Running)]);
+    }
+
+    #[test]
+    fn sound_names_cover_macos_formats() {
+        let dir = std::env::temp_dir().join(format!("tachi-noti-test-sounds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["Glass.aiff", "custom.wav", "Voice.m4a", "notes.txt", "noext"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let mut names = sound_names_in(&dir);
+        names.sort();
+        assert_eq!(names, vec!["Glass", "Voice", "custom"], "audio files only, extension stripped");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

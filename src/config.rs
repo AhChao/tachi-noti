@@ -62,17 +62,28 @@ pub fn load() -> Config {
 /// Persist the completion sound chosen from the tachi-bar menu. Edits the
 /// config file in place (toml_edit keeps comments and unknown keys intact).
 pub fn set_stop_sound(name: &str) -> Result<(), String> {
-    let path = config_path().ok_or("cannot resolve home directory")?;
-    set_stop_sound_at(&path, name)
+    set_sound("stop", name)
 }
 
-fn set_stop_sound_at(path: &std::path::Path, name: &str) -> Result<(), String> {
+/// Persist the attention sound (permission / question / plan notifications).
+pub fn set_attention_sound(name: &str) -> Result<(), String> {
+    set_sound("attention", name)
+}
+
+fn set_sound(key: &str, name: &str) -> Result<(), String> {
+    let path = config_path().ok_or("cannot resolve home directory")?;
+    set_sound_at(&path, key, name)
+}
+
+fn set_sound_at(path: &std::path::Path, key: &str, name: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| format!("config is not valid TOML: {e}"))?;
-    if doc.get("sounds").map(|s| !s.is_table()).unwrap_or(false) {
+    // is_table_like, not is_table: a hand-written `sounds = { stop = "X" }`
+    // inline table must stay editable too.
+    if doc.get("sounds").map(|s| !s.is_table_like()).unwrap_or(false) {
         return Err("config key 'sounds' exists but is not a table".into());
     }
-    doc["sounds"]["stop"] = toml_edit::value(name);
+    doc["sounds"][key] = toml_edit::value(name);
     let dir = path.parent().ok_or("config path has no parent")?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!(".config.toml.tmp.{}", std::process::id()));
@@ -93,7 +104,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
         std::fs::write(&p, "# my notes\nmin_duration_secs = 15\n\n[sounds]\nattention = \"Ping\"\n").unwrap();
-        set_stop_sound_at(&p, "TachiBark").unwrap();
+        set_sound_at(&p, "stop", "TachiBark").unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("# my notes"), "comments survive");
         assert!(text.contains("min_duration_secs = 15"));
@@ -102,9 +113,27 @@ mod tests {
         assert_eq!(c.sounds.attention, "Ping");
         // Missing file → created from scratch.
         let p2 = dir.join("fresh.toml");
-        set_stop_sound_at(&p2, "Glass").unwrap();
+        set_sound_at(&p2, "stop", "Glass").unwrap();
         let c: Config = toml::from_str(&std::fs::read_to_string(&p2).unwrap()).unwrap();
         assert_eq!(c.sounds.stop, "Glass");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_sound_accepts_inline_table() {
+        // A hand-written config commonly uses the inline form; the picker
+        // must edit it rather than refuse (it used to error out here).
+        let dir = std::env::temp_dir().join(format!("tachi-noti-test-inline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "sounds = { stop = \"TachiBark\" }\n").unwrap();
+        set_sound_at(&p, "attention", "Ping").unwrap();
+        let c: Config = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(c.sounds.stop, "TachiBark", "existing key untouched");
+        assert_eq!(c.sounds.attention, "Ping");
+        // A scalar `sounds` is still rejected rather than clobbered.
+        std::fs::write(&p, "sounds = \"oops\"\n").unwrap();
+        assert!(set_sound_at(&p, "stop", "Glass").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

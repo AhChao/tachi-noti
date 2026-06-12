@@ -14,7 +14,7 @@ His portrait rides along inside the binary, so every notification arrives with h
 
 ## What he announces
 
-- **Task complete** (`Stop`) — repo name, `repo @ branch` subtitle, Claude's last reply (truncated), elapsed time, with a sound of your choosing — including **Tachi's own woof** (embedded in the binary, auto-installed to `~/Library/Sounds/TachiBark.aiff`). Pick it from the tachi-bar menu (Notification Sound) or set it in config.
+- **Task complete** (`Stop`) — repo name, `repo @ branch` subtitle, Claude's last reply (truncated), elapsed time, with a sound of your choosing — including **Tachi's own woof** (embedded in the binary, auto-installed to `~/Library/Sounds/TachiBark.aiff`). Pick it from the tachi-bar menu (Completion Sound) or set it in config.
 - **Needs your input** (`Notification`: permission prompt / idle) — the prompt message, Basso sound, so you can tell "done" from "waiting" by ear.
 - **Focus suppression** — no notification when the terminal/IDE hosting the session is already frontmost. (A butler doesn't announce guests you're already talking to.)
 - **Click-to-focus** — clicking the notification activates the right app (requires `terminal-notifier`). For VS Code-family apps (VS Code, Cursor, Antigravity, Windsurf, …) it focuses the exact window that has the session's project folder open, even with multiple windows of the same app.
@@ -29,7 +29,7 @@ His portrait rides along inside the binary, so every notification arrives with h
 - The menu bar shows a dog symbol with at-a-glance counts like `🐕 ●1 ●2 ●3` — waiting first (it needs you), then running, then idle (so spare sessions register without opening the menu); just the dog when no sessions exist. Stale "running" sessions that died without cleanup are demoted automatically so the counts stay honest.
 - **Click a session to jump to its exact IDE window** (same window-precise focus as the notifications).
 - A **Usage section** with your official Claude Code rate-limit numbers — 5-hour and weekly utilization with reset countdowns — plus a red ⚠ in the menu bar title when either window crosses `usage_alert_pct` (default 80, 0 to disable). The data comes from Claude Code's own statusLine payload: `tachi-noti install` puts a tiny capture stage (`tachi-noti statusline --chain '<your original statusline>'`) at the front of your statusLine pipeline — your existing statusline keeps rendering, zero network calls, no OAuth-token shenanigans (Anthropic's ToS bans third-party use of those, and the unofficial endpoint is blocked anyway). Transcript-based estimators were rejected too: their token counts are off by 46–100×. Pro/Max only — API-key accounts get no `rate_limits` payload.
-- A "Recent notifications" submenu (last 5), a **Notification Sound picker** (Tachi's bark, every system sound, or silent — plays a preview on selection and persists to config), a Launch-at-Login toggle, and nothing else.
+- A "Recent notifications" submenu (last 5), **two sound pickers** — Completion Sound (Stop) and Attention Sound (permission / question / plan) — listing Tachi's bark, your own `~/Library/Sounds`, every system sound, or silent (plays a preview on selection and persists to config), a Launch-at-Login toggle, a **Restart Tachi Bar** item (kicks the launchd agent when it manages the process, otherwise hands over to a fresh copy), and Quit.
 
 No daemon, no IPC: the hooks write tiny per-session state files under `~/Library/Application Support/tachi-noti/state/`, and the bar re-reads them every 2 seconds.
 
@@ -69,9 +69,10 @@ max_body_len = 120         # truncate notification body to this many chars
 
 [sounds]
 stop = "Glass"             # completion sound: "TachiBark" = Tachi's woof,
-                           # "" = silent, or any name from /System/Library/Sounds.
-                           # Also settable from the tachi-bar menu (with preview).
-attention = "Basso"
+                           # "" = silent, or any sound name from ~/Library/Sounds
+                           # or /System/Library/Sounds (extension dropped).
+attention = "Basso"        # permission / question / plan-approval sound.
+                           # Both settable from the tachi-bar menu (with preview).
 ```
 
 ## Commands
