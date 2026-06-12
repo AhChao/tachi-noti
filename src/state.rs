@@ -33,6 +33,10 @@ pub struct SessionState {
     /// What the session is waiting on, when status == Waiting.
     #[serde(default)]
     pub waiting: Option<WaitingInfo>,
+    /// Pid of the hosting Claude Code process — the liveness signal that lets
+    /// the bar drop sessions killed without a SessionEnd (e.g. IDE quit).
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -79,6 +83,7 @@ pub struct Ctx {
     pub branch: Option<String>,
     pub bundle_id: Option<String>,
     pub cwd: String,
+    pub pid: Option<u32>,
 }
 
 pub enum Event<'a> {
@@ -117,6 +122,7 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
         task_started_at: None,
         last_event_at: now,
         waiting: None,
+        pid: ctx.pid,
     };
     // Refresh identity fields on every event (branch may change mid-session).
     let carry = |mut s: SessionState| {
@@ -125,6 +131,9 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
         s.branch = ctx.branch.clone();
         if ctx.bundle_id.is_some() {
             s.bundle_id = ctx.bundle_id.clone();
+        }
+        if ctx.pid.is_some() {
+            s.pid = ctx.pid;
         }
         s.cwd = ctx.cwd.clone();
         s.last_event_at = now;
@@ -257,8 +266,27 @@ pub fn live_count() -> usize {
     load_all().len()
 }
 
+/// True when the pid exists and is ours to signal. EPERM (exists, other
+/// user) counts as dead: our same-user Claude can't have become that.
+pub fn pid_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Drop sessions whose recorded Claude process is gone (IDE quit, terminal
+/// killed — no SessionEnd ever fires) and delete their state files.
+/// Sessions without a recorded pid (old files, undetectable host) are kept
+/// and only expire by time.
+pub fn reap_dead(states: Vec<SessionState>) -> Vec<SessionState> {
+    let (live, dead): (Vec<_>, Vec<_>) =
+        states.into_iter().partition(|s| s.pid.map(pid_alive).unwrap_or(true));
+    for s in &dead {
+        remove(&s.session_id);
+    }
+    live
+}
+
 /// Remove state (and stray tmp) files untouched for 48h — sessions that died
-/// without a SessionEnd.
+/// without a SessionEnd — plus any session whose Claude process is gone.
 pub fn cleanup_stale() {
     let Ok(entries) = std::fs::read_dir(state_dir()) else { return };
     let now = SystemTime::now();
@@ -274,6 +302,7 @@ pub fn cleanup_stale() {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+    let _ = reap_dead(load_all());
 }
 
 pub fn format_duration(d: Duration) -> String {
@@ -299,6 +328,7 @@ mod tests {
             branch: Some("main".into()),
             bundle_id: Some("com.example.ide".into()),
             cwd: "/tmp/myrepo".into(),
+            pid: Some(4242),
         }
     }
 
@@ -450,6 +480,42 @@ mod tests {
             "bundle_id":null,"cwd":"/tmp","status":"idle","status_since":1,"task_started_at":null,"last_event_at":1}"#;
         let s: SessionState = serde_json::from_str(json).unwrap();
         assert_eq!(s.waiting, None);
+        assert_eq!(s.pid, None, "pre-pid files parse and are only time-expired");
+    }
+
+    #[test]
+    fn pid_recorded_and_backfilled() {
+        let c = ctx("s9");
+        let s = apply_event(None, &c, Event::PromptSubmit, 100, None).save.unwrap();
+        assert_eq!(s.pid, Some(4242));
+        // An old state file without pid gets it backfilled on the next event…
+        let mut old = s.clone();
+        old.pid = None;
+        let s2 = apply_event(Some(old), &c, Event::Stop, 110, Some(0)).save.unwrap();
+        assert_eq!(s2.pid, Some(4242));
+        // …and a pid-less ctx (host undetectable) never erases a known pid.
+        let mut blind = ctx("s9");
+        blind.pid = None;
+        let s3 = apply_event(Some(s2), &blind, Event::PromptSubmit, 120, Some(0)).save.unwrap();
+        assert_eq!(s3.pid, Some(4242));
+    }
+
+    #[test]
+    fn reap_drops_only_dead_pids() {
+        let c = ctx(&format!("reap-{}", std::process::id()));
+        let mk = |pid: Option<u32>| {
+            let mut s = apply_event(None, &c, Event::PromptSubmit, 100, None).save.unwrap();
+            s.pid = pid;
+            s
+        };
+        let states = vec![
+            mk(Some(std::process::id())), // alive: this very test process
+            mk(None),                     // unknown host: kept
+            mk(Some(4_000_000)),          // beyond macOS pid_max: dead
+        ];
+        let live = reap_dead(states);
+        let pids: Vec<Option<u32>> = live.iter().map(|s| s.pid).collect();
+        assert_eq!(pids, vec![Some(std::process::id()), None]);
     }
 
     #[test]

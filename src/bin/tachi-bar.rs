@@ -370,7 +370,7 @@ mod ui {
         /// 2s heartbeat: title always; open-menu row labels by session identity.
         fn refresh(&self) {
             let now = state::now_epoch();
-            let states = state::load_all();
+            let states = state::reap_dead(state::load_all());
             let snap = bar::build_snapshot(states.clone(), now);
             let alert = usage::load()
                 .map(|u| bar::usage_alert(&u, config::load().usage_alert_pct))
@@ -403,7 +403,7 @@ mod ui {
             let mtm = self.mtm();
             menu.removeAllItems();
             let now = state::now_epoch();
-            let states = state::load_all();
+            let states = state::reap_dead(state::load_all());
             let snap = bar::build_snapshot(states.clone(), now);
             let mut actions: Vec<Action> = Vec::new();
 

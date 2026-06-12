@@ -290,6 +290,7 @@ mod tests {
             task_started_at: if status == Status::Running { Some(last_event_at.saturating_sub(200)) } else { None },
             last_event_at,
             waiting: None,
+            pid: None,
         }
     }
 

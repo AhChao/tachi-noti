@@ -70,6 +70,7 @@ fn build_ctx(input: &HookInput) -> state::Ctx {
         branch: repo.branch,
         bundle_id: focus::session_bundle_id(),
         cwd: cwd.to_string_lossy().into_owned(),
+        pid: focus::claude_ancestor_pid(),
     }
 }
 
@@ -324,6 +325,7 @@ pub fn run_doctor() -> Result<()> {
     println!("TERM_PROGRAM:     {}", std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "(unset)".into()));
     println!("__CFBundleIdent:  {}", std::env::var("__CFBundleIdentifier").unwrap_or_else(|_| "(unset)".into()));
     println!("session bundle:   {}", focus::session_bundle_id().unwrap_or_else(|| "(unknown — no click-to-focus / suppression)".into()));
+    println!("claude pid:       {}", focus::claude_ancestor_pid().map(|p| p.to_string()).unwrap_or_else(|| "(not under a Claude session — liveness reaping relies on this)".into()));
     println!("frontmost now:    {}", focus::frontmost_bundle_id().unwrap_or_else(|| "(unknown)".into()));
     match config::config_path() {
         Some(p) if p.exists() => println!("config:           {} (loaded)", p.display()),

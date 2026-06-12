@@ -20,7 +20,7 @@ required-features = ["bar"]
 
 [features]
 default = []
-bar = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:libc"]
+bar = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -29,7 +29,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 toml_edit = "0.22"
 dirs = "6"
-libc = { version = "0.2", optional = true }
+libc = "0.2"
 objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", optional = true, features = [
     "NSString", "NSDate", "NSTimer", "NSRunLoop", "NSThread", "NSObjCRuntime",

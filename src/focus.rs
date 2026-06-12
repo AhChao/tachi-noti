@@ -25,6 +25,69 @@ pub fn term_program_to_bundle_id(term_program: &str) -> Option<&'static str> {
     }
 }
 
+/// Parent pid of a process via libproc — no subprocess spawned.
+fn proc_ppid(pid: u32) -> Option<u32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let rc = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if rc != size {
+        return None;
+    }
+    Some(info.pbi_ppid)
+}
+
+/// Executable path of a process (resolved, not argv[0]).
+fn proc_path(pid: u32) -> Option<std::path::PathBuf> {
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let rc = unsafe {
+        libc::proc_pidpath(pid as libc::c_int, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+    };
+    if rc <= 0 {
+        return None;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..rc as usize])))
+}
+
+/// Does this executable path look like the Claude Code CLI? The kernel's
+/// process name can't be trusted: the native install runs a binary literally
+/// named after its version (~/.local/share/claude/versions/2.1.175), so match
+/// the path instead — a `claude`-named file/directory, or a JS runtime
+/// (npm installs run the CLI under node/bun/deno).
+fn is_claude_host(path: &std::path::Path) -> bool {
+    let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if ["claude", "node", "bun", "deno"].contains(&base) {
+        return true;
+    }
+    path.components().any(|c| c.as_os_str() == "claude")
+}
+
+/// Pid of the Claude Code process hosting this hook: the nearest ancestor
+/// whose executable looks like the CLI (hook → sh → claude → shell → IDE).
+/// The nearest match also picks the right session for nested `claude`
+/// invocations. None = couldn't tell (the session then only expires by time).
+pub fn claude_ancestor_pid() -> Option<u32> {
+    let mut pid = std::os::unix::process::parent_id();
+    for _ in 0..15 {
+        if pid <= 1 {
+            return None;
+        }
+        if proc_path(pid).map(|p| is_claude_host(&p)).unwrap_or(false) {
+            return Some(pid);
+        }
+        pid = proc_ppid(pid)?;
+    }
+    None
+}
+
 /// Frontmost app's bundle id via lsappinfo (fast, no Automation permission).
 pub fn frontmost_bundle_id() -> Option<String> {
     let front = Command::new("/usr/bin/lsappinfo").arg("front").output().ok()?;
@@ -68,6 +131,32 @@ mod tests {
         );
         assert_eq!(parse_bundleid_output(""), None);
         assert_eq!(parse_bundleid_output("garbage"), Some("garbage".to_string()));
+    }
+
+    #[test]
+    fn proc_introspection_resolves_self_and_rejects_bogus_pid() {
+        assert!(proc_ppid(std::process::id()).expect("own process must resolve") > 0);
+        let path = proc_path(std::process::id()).expect("own path must resolve");
+        assert!(path.is_absolute());
+        // macOS pid_max is 99999 — far beyond it can never exist.
+        assert!(proc_ppid(4_000_000).is_none());
+        assert!(proc_path(4_000_000).is_none());
+    }
+
+    #[test]
+    fn claude_host_path_shapes() {
+        use std::path::Path;
+        // Native install: versioned binary under a claude directory.
+        assert!(is_claude_host(Path::new("/Users/x/.local/share/claude/versions/2.1.175")));
+        // Plain binary or symlink target named claude.
+        assert!(is_claude_host(Path::new("/opt/homebrew/bin/claude")));
+        // npm install runs under a JS runtime.
+        assert!(is_claude_host(Path::new("/usr/local/bin/node")));
+        assert!(is_claude_host(Path::new("/Users/x/.bun/bin/bun")));
+        // Ordinary ancestors must not match.
+        assert!(!is_claude_host(Path::new("/bin/zsh")));
+        assert!(!is_claude_host(Path::new("/Applications/Antigravity IDE.app/Contents/MacOS/Electron")));
+        assert!(!is_claude_host(Path::new("/Users/x/.claude/something")));
     }
 
     #[test]
