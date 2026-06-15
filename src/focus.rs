@@ -57,30 +57,19 @@ fn proc_path(pid: u32) -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..rc as usize])))
 }
 
-/// Does this executable path look like the Claude Code CLI? The kernel's
-/// process name can't be trusted: the native install runs a binary literally
-/// named after its version (~/.local/share/claude/versions/2.1.175), so match
-/// the path instead — a `claude`-named file/directory, or a JS runtime
-/// (npm installs run the CLI under node/bun/deno).
-fn is_claude_host(path: &std::path::Path) -> bool {
-    let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if ["claude", "node", "bun", "deno"].contains(&base) {
-        return true;
-    }
-    path.components().any(|c| c.as_os_str() == "claude")
-}
-
-/// Pid of the Claude Code process hosting this hook: the nearest ancestor
-/// whose executable looks like the CLI (hook → sh → claude → shell → IDE).
-/// The nearest match also picks the right session for nested `claude`
-/// invocations. None = couldn't tell (the session then only expires by time).
-pub fn claude_ancestor_pid() -> Option<u32> {
+/// Pid of the agent process hosting this event: the nearest ancestor whose
+/// executable matches the agent's host signature (event → sh → agent → shell →
+/// IDE). Matching the path (not the kernel process name) is required because
+/// e.g. Claude's native install runs a binary named after its version. The
+/// nearest match also picks the right session for nested invocations.
+/// None = couldn't tell (the session then only expires by time).
+pub fn agent_ancestor_pid(agent: crate::agent::AgentId) -> Option<u32> {
     let mut pid = std::os::unix::process::parent_id();
     for _ in 0..15 {
         if pid <= 1 {
             return None;
         }
-        if proc_path(pid).map(|p| is_claude_host(&p)).unwrap_or(false) {
+        if proc_path(pid).map(|p| agent.matches_host(&p)).unwrap_or(false) {
             return Some(pid);
         }
         pid = proc_ppid(pid)?;
@@ -141,22 +130,6 @@ mod tests {
         // macOS pid_max is 99999 — far beyond it can never exist.
         assert!(proc_ppid(4_000_000).is_none());
         assert!(proc_path(4_000_000).is_none());
-    }
-
-    #[test]
-    fn claude_host_path_shapes() {
-        use std::path::Path;
-        // Native install: versioned binary under a claude directory.
-        assert!(is_claude_host(Path::new("/Users/x/.local/share/claude/versions/2.1.175")));
-        // Plain binary or symlink target named claude.
-        assert!(is_claude_host(Path::new("/opt/homebrew/bin/claude")));
-        // npm install runs under a JS runtime.
-        assert!(is_claude_host(Path::new("/usr/local/bin/node")));
-        assert!(is_claude_host(Path::new("/Users/x/.bun/bin/bun")));
-        // Ordinary ancestors must not match.
-        assert!(!is_claude_host(Path::new("/bin/zsh")));
-        assert!(!is_claude_host(Path::new("/Applications/Antigravity IDE.app/Contents/MacOS/Electron")));
-        assert!(!is_claude_host(Path::new("/Users/x/.claude/something")));
     }
 
     #[test]

@@ -63,14 +63,18 @@ fn build_ctx(input: &HookInput) -> state::Ctx {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let repo = gitinfo::detect(&cwd);
+    // This entry point is the Claude rich-hook adapter: the agent identity is
+    // known from the fact that a Claude hook invoked us.
+    let agent = crate::agent::AgentId::Claude;
     state::Ctx {
         session_id: input.session_id.clone().unwrap_or_else(|| "unknown".into()),
+        agent,
         repo_name: repo.name,
         repo_root: repo.toplevel.map(|p| p.to_string_lossy().into_owned()),
         branch: repo.branch,
         bundle_id: focus::session_bundle_id(),
         cwd: cwd.to_string_lossy().into_owned(),
-        pid: focus::claude_ancestor_pid(),
+        pid: focus::agent_ancestor_pid(agent),
     }
 }
 
@@ -78,13 +82,13 @@ fn build_ctx(input: &HookInput) -> state::Ctx {
 /// already Waiting within this window was just announced.
 const DEDUP_WINDOW_SECS: u64 = 10;
 
-struct Applied {
-    transition: state::Transition,
+pub(crate) struct Applied {
+    pub(crate) transition: state::Transition,
     /// The session was already in a fresh Waiting state before this event.
     was_recently_waiting: bool,
 }
 
-fn transition(ctx: &state::Ctx, ev: state::Event) -> Applied {
+pub(crate) fn transition(ctx: &state::Ctx, ev: state::Event) -> Applied {
     let prev = state::load(&ctx.session_id);
     let age = state::file_age_secs(&ctx.session_id);
     let now = state::now_epoch();
@@ -164,7 +168,7 @@ fn on_notification(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
         .message
         .clone()
         .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| "Claude needs your input".to_string());
+        .unwrap_or_else(|| format!("{} needs your input", ctx.agent.display_name()));
     let body = transcript::squash(&body, cfg.max_body_len);
 
     let notice = build_notice(cfg, ctx, body, &cfg.sounds.attention);
@@ -193,7 +197,7 @@ fn on_permission_request(input: &HookInput, cfg: &config::Config, ctx: &state::C
         state::WaitKind::Plan => "Plan ready — waiting for your approval".to_string(),
         _ => detail
             .map(|d| format!("Permission: {d}"))
-            .unwrap_or_else(|| "Claude needs your permission".to_string()),
+            .unwrap_or_else(|| format!("{} needs your permission", ctx.agent.display_name())),
     };
     let body = transcript::squash(&body, cfg.max_body_len);
     let notice = build_notice(cfg, ctx, body, &cfg.sounds.attention);
@@ -240,7 +244,7 @@ fn on_pre_tool_use(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
     if cfg.focus_suppression && focus::session_is_frontmost() {
         return Ok(());
     }
-    let body = question.unwrap_or_else(|| "Claude has a question for you".to_string());
+    let body = question.unwrap_or_else(|| format!("{} has a question for you", ctx.agent.display_name()));
     let body = transcript::squash(&body, cfg.max_body_len);
     let notice = build_notice(cfg, ctx, body, &cfg.sounds.attention);
     notify::send(&notify::detect(cfg), &notice)?;
@@ -248,7 +252,7 @@ fn on_pre_tool_use(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
     Ok(())
 }
 
-fn record_history(event: &str, ctx: &state::Ctx, body: &str) {
+pub(crate) fn record_history(event: &str, ctx: &state::Ctx, body: &str) {
     history::append(&history::Entry {
         ts: state::now_epoch(),
         event: event.to_string(),
@@ -259,7 +263,7 @@ fn record_history(event: &str, ctx: &state::Ctx, body: &str) {
     });
 }
 
-fn build_notice(cfg: &config::Config, ctx: &state::Ctx, body: String, sound: &str) -> Notice {
+pub(crate) fn build_notice(cfg: &config::Config, ctx: &state::Ctx, body: String, sound: &str) -> Notice {
     let subtitle = ctx
         .branch
         .as_deref()
@@ -325,7 +329,7 @@ pub fn run_doctor() -> Result<()> {
     println!("TERM_PROGRAM:     {}", std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "(unset)".into()));
     println!("__CFBundleIdent:  {}", std::env::var("__CFBundleIdentifier").unwrap_or_else(|_| "(unset)".into()));
     println!("session bundle:   {}", focus::session_bundle_id().unwrap_or_else(|| "(unknown — no click-to-focus / suppression)".into()));
-    println!("claude pid:       {}", focus::claude_ancestor_pid().map(|p| p.to_string()).unwrap_or_else(|| "(not under a Claude session — liveness reaping relies on this)".into()));
+    println!("claude pid:       {}", focus::agent_ancestor_pid(crate::agent::AgentId::Claude).map(|p| p.to_string()).unwrap_or_else(|| "(not under a Claude session — liveness reaping relies on this)".into()));
     println!("frontmost now:    {}", focus::frontmost_bundle_id().unwrap_or_else(|| "(unknown)".into()));
     match config::config_path() {
         Some(p) if p.exists() => println!("config:           {} (loaded)", p.display()),

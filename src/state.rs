@@ -21,6 +21,10 @@ pub fn state_dir() -> PathBuf {
 pub struct SessionState {
     pub version: u32,
     pub session_id: String,
+    /// Which coding agent owns this session. Defaults to Claude so state files
+    /// written before multi-agent support still parse.
+    #[serde(default)]
+    pub agent: crate::agent::AgentId,
     pub repo_name: String,
     pub repo_root: Option<String>,
     pub branch: Option<String>,
@@ -78,6 +82,7 @@ pub enum Status {
 /// Session context captured by the hook at event time.
 pub struct Ctx {
     pub session_id: String,
+    pub agent: crate::agent::AgentId,
     pub repo_name: String,
     pub repo_root: Option<String>,
     pub branch: Option<String>,
@@ -112,6 +117,7 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
     let fresh = |status: Status| SessionState {
         version: 1,
         session_id: ctx.session_id.clone(),
+        agent: ctx.agent,
         repo_name: ctx.repo_name.clone(),
         repo_root: ctx.repo_root.clone(),
         branch: ctx.branch.clone(),
@@ -323,6 +329,7 @@ mod tests {
     fn ctx(id: &str) -> Ctx {
         Ctx {
             session_id: id.into(),
+            agent: crate::agent::AgentId::Claude,
             repo_name: "myrepo".into(),
             repo_root: Some("/tmp/myrepo".into()),
             branch: Some("main".into()),
@@ -481,6 +488,7 @@ mod tests {
         let s: SessionState = serde_json::from_str(json).unwrap();
         assert_eq!(s.waiting, None);
         assert_eq!(s.pid, None, "pre-pid files parse and are only time-expired");
+        assert_eq!(s.agent, crate::agent::AgentId::Claude, "pre-agent files default to Claude");
     }
 
     #[test]

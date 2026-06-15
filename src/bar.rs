@@ -280,6 +280,7 @@ mod tests {
         SessionState {
             version: 1,
             session_id: id.into(),
+            agent: crate::agent::AgentId::Claude,
             repo_name: basename(root).into(),
             repo_root: Some(root.into()),
             branch: Some("main".into()),

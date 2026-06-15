@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod bar;
 pub mod config;
 pub mod focus;
