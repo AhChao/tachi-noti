@@ -15,7 +15,52 @@ pub fn detect(cwd: &Path) -> RepoInfo {
     let Some((toplevel, gitdir)) = find_gitdir(cwd) else {
         return RepoInfo { name: fallback_name, branch: None, toplevel: None };
     };
-    RepoInfo { name: basename(&toplevel), branch: read_branch(&gitdir), toplevel: Some(toplevel) }
+    let branch = read_branch(&gitdir);
+    // A linked worktree (e.g. a subagent run with `isolation: worktree`) lives
+    // in its own throwaway folder, but its identity is the *shared* repo. Group
+    // it under the main repo via the `commondir` pointer instead of the worktree
+    // folder name — otherwise every worktree shows up as its own project and
+    // never lands under the repo it forked from. The branch stays the
+    // worktree's own, which is the useful per-worktree distinction.
+    if let Some(main_root) = worktree_main_root(&gitdir) {
+        return RepoInfo { name: basename(&main_root), branch, toplevel: Some(main_root) };
+    }
+    RepoInfo { name: basename(&toplevel), branch, toplevel: Some(toplevel) }
+}
+
+/// If `gitdir` is a linked worktree's git dir (`…/.git/worktrees/<name>`),
+/// resolve the main repo root through its `commondir` pointer. Returns `None`
+/// for a normal checkout or a submodule (neither has a `commondir`), leaving
+/// the caller's folder-based name in place.
+fn worktree_main_root(gitdir: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let raw = raw.trim();
+    let common = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { gitdir.join(raw) };
+    let common = lexical_normalize(&common);
+    // `commondir` points at the shared ".git"; the repo root is its parent.
+    // Bare/unusual layouts (common dir not named ".git") are their own identity.
+    if common.file_name().map(|n| n == ".git").unwrap_or(false) {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        Some(common)
+    }
+}
+
+/// Resolve `.`/`..` lexically, without touching the filesystem (so a relative
+/// `commondir` like `../..` collapses to a clean path we can take a basename of).
+fn lexical_normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn basename(p: &Path) -> String {
@@ -98,17 +143,37 @@ mod tests {
     }
 
     #[test]
-    fn worktree_gitfile_relative() {
+    fn worktree_groups_under_main_repo() {
+        // A linked worktree's `commondir` points back at the main repo's .git,
+        // so it must group under the main repo — not its throwaway folder.
         let d = tmpdir("worktree");
         let main_gitdir = d.join("main/.git/worktrees/wt");
         fs::create_dir_all(&main_gitdir).unwrap();
         fs::write(main_gitdir.join("HEAD"), "ref: refs/heads/wt-branch\n").unwrap();
-        let wt = d.join("wt");
+        fs::write(main_gitdir.join("commondir"), "../..\n").unwrap(); // → main/.git
+        let wt = d.join("agent-worktree-xyz");
         fs::create_dir_all(&wt).unwrap();
         fs::write(wt.join(".git"), "gitdir: ../main/.git/worktrees/wt\n").unwrap();
         let info = detect(&wt);
-        assert_eq!(info.name, "wt");
-        assert_eq!(info.branch.as_deref(), Some("wt-branch"));
+        assert_eq!(info.name, "main", "named after the main repo, not the worktree folder");
+        assert_eq!(info.toplevel.as_deref(), Some(d.join("main").as_path()), "grouped under main repo root");
+        assert_eq!(info.branch.as_deref(), Some("wt-branch"), "branch stays the worktree's own");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn submodule_without_commondir_keeps_own_name() {
+        // A submodule's .git file has no `commondir`; it is its own project.
+        let d = tmpdir("submodule");
+        let mod_gitdir = d.join("super/.git/modules/sub");
+        fs::create_dir_all(&mod_gitdir).unwrap();
+        fs::write(mod_gitdir.join("HEAD"), "ref: refs/heads/sub-branch\n").unwrap();
+        let sub = d.join("super/sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        let info = detect(&sub);
+        assert_eq!(info.name, "sub");
+        assert_eq!(info.branch.as_deref(), Some("sub-branch"));
         let _ = fs::remove_dir_all(&d);
     }
 
