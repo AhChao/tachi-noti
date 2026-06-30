@@ -19,6 +19,18 @@ pub struct HookInput {
     pub tool_name: Option<String>,
     pub tool_input: Option<serde_json::Value>,
     pub permission_mode: Option<String>,
+    /// In-flight background tasks (subagents / background bash) reported by the
+    /// Stop hook. Absent on Claude Code versions that don't emit it (→ None).
+    #[serde(default)]
+    pub background_tasks: Option<Vec<BackgroundTask>>,
+}
+
+/// One entry of the Stop hook's `background_tasks` array. Only `status` is
+/// needed (the rest — id/type/description/agent_type — is ignored).
+#[derive(Deserialize, Default)]
+pub struct BackgroundTask {
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 pub fn run() -> Result<()> {
@@ -103,10 +115,27 @@ pub(crate) fn transition(ctx: &state::Ctx, ev: state::Event) -> Applied {
     Applied { transition: t, was_recently_waiting }
 }
 
+/// True when the Stop hook reports a background task (subagent or background
+/// bash) still running. Versions without the field deserialize to None → false.
+fn background_running(input: &HookInput) -> bool {
+    input
+        .background_tasks
+        .as_deref()
+        .map(|ts| ts.iter().any(|t| t.status.as_deref() == Some("running")))
+        .unwrap_or(false)
+}
+
 fn on_stop(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<()> {
     // State first: the transition must happen even if the popup is suppressed.
     let t = transition(ctx, state::Event::Stop);
     let duration = t.transition.task_duration;
+
+    // Background tasks (subagents / background bash) still running: this Stop is
+    // the main turn yielding, not the task finishing. Stay silent and log
+    // nothing — the real final Stop (background_tasks drained) rings once.
+    if background_running(input) {
+        return Ok(());
+    }
 
     if cfg.min_duration_secs > 0 {
         // Only suppress when we positively know the turn was quick.
@@ -400,5 +429,55 @@ pub fn debug_log(msg: &str) {
                 let _ = writeln!(f, "[{ts}] {msg}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> HookInput {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn bg_running_when_a_subagent_is_running() {
+        // Real Stop payload shape captured from Claude Code 2.1.196.
+        let i = parse(
+            r#"{"hook_event_name":"Stop","background_tasks":[
+                {"id":"a","type":"subagent","status":"running","agent_type":"general-purpose"}]}"#,
+        );
+        assert!(background_running(&i));
+    }
+
+    #[test]
+    fn not_running_when_background_tasks_empty() {
+        let i = parse(r#"{"hook_event_name":"Stop","background_tasks":[]}"#);
+        assert!(!background_running(&i));
+    }
+
+    #[test]
+    fn not_running_when_field_absent() {
+        // Older Claude Code without the field: must fall back to ringing.
+        let i = parse(r#"{"hook_event_name":"Stop"}"#);
+        assert!(!background_running(&i));
+    }
+
+    #[test]
+    fn not_running_when_only_completed_tasks_listed() {
+        let i = parse(
+            r#"{"hook_event_name":"Stop","background_tasks":[
+                {"id":"a","type":"subagent","status":"completed"}]}"#,
+        );
+        assert!(!background_running(&i));
+    }
+
+    #[test]
+    fn running_if_any_task_running_among_several() {
+        let i = parse(
+            r#"{"hook_event_name":"Stop","background_tasks":[
+                {"status":"completed"},{"status":"running"}]}"#,
+        );
+        assert!(background_running(&i));
     }
 }
