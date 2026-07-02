@@ -29,7 +29,7 @@ His portrait rides along inside the binary, so every notification arrives with h
 - The menu bar shows a dog symbol with at-a-glance counts like `🐕 ●1 ●2 ●3` — waiting first (it needs you), then running, then idle (so spare sessions register without opening the menu); just the dog when no sessions exist. Stale "running" sessions that died without cleanup are demoted automatically so the counts stay honest. Each session records its Claude process pid, and the bar reaps sessions whose process is gone — quitting the IDE (which never fires `SessionEnd`) removes its sessions from the menu within seconds instead of leaving 12-hour ghosts.
 - **Click a session to jump to its exact IDE window** (same window-precise focus as the notifications).
 - A **Usage section** with your official Claude Code rate-limit numbers — 5-hour and weekly utilization with reset countdowns — plus a red ⚠ in the menu bar title when either window crosses `usage_alert_pct` (default 80, 0 to disable). The data comes from Claude Code's own statusLine payload: `tachi-noti install` puts a tiny capture stage (`tachi-noti statusline --chain '<your original statusline>'`) at the front of your statusLine pipeline — your existing statusline keeps rendering, zero network calls, no OAuth-token shenanigans (Anthropic's ToS bans third-party use of those, and the unofficial endpoint is blocked anyway). Transcript-based estimators were rejected too: their token counts are off by 46–100×. Pro/Max only — API-key accounts get no `rate_limits` payload.
-- A "Recent notifications" submenu (last 5), **two sound pickers** — Completion Sound (Stop) and Attention Sound (permission / question / plan) — listing Tachi's bark, your own `~/Library/Sounds`, every system sound, or silent (plays a preview on selection and persists to config), a Launch-at-Login toggle, a **Restart Tachi Bar** item (kicks the launchd agent when it manages the process, otherwise hands over to a fresh copy), and Quit.
+- A "Recent notifications" submenu (last 5), **two sound pickers** — Completion Sound (Stop) and Attention Sound (permission / question / plan) — listing Tachi's bark, your own `~/Library/Sounds`, every system sound, or silent (plays a preview on selection and persists to config), a Launch-at-Login toggle, a **Restart Tachi Bar** item (fully reloads the launchd agent — bootout + bootstrap — so restarting still works after the binary was replaced by `cargo install`; without the agent it hands over to a fresh copy), and Quit.
 
 No daemon, no IPC: the hooks write tiny per-session state files under `~/Library/Application Support/tachi-noti/state/`, and the bar re-reads them every 2 seconds.
 
@@ -37,6 +37,8 @@ No daemon, no IPC: the hooks write tiny per-session state files under `~/Library
 cargo install --path . --features bar   # installs tachi-noti + tachi-bar
 tachi-bar                               # run it
 tachi-bar install-agent                 # optional: start at login (launchd)
+tachi-bar install-app                   # optional: "Tachi Bar.app" in ~/Applications, launchable from Spotlight
+                                        # (a Spotlight launch hands off to the launchd agent when one is installed)
 ```
 
 ## Install

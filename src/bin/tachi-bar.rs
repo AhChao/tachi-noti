@@ -16,12 +16,18 @@ enum Cmd {
     InstallAgent,
     /// Remove the launchd agent
     UninstallAgent,
+    /// Install "Tachi Bar.app" in ~/Applications so Spotlight can launch it
+    InstallApp,
+    /// Remove the app wrapper from ~/Applications
+    UninstallApp,
 }
 
 fn main() {
     match Cli::parse().cmd {
         Some(Cmd::InstallAgent) => agent::install(),
         Some(Cmd::UninstallAgent) => agent::uninstall(),
+        Some(Cmd::InstallApp) => app::install(),
+        Some(Cmd::UninstallApp) => app::uninstall(),
         None => {
             // Single instance: a manual launch racing the launchd agent (its
             // KeepAlive respawns on kill) must not stack a second status item.
@@ -31,6 +37,17 @@ fn main() {
                 eprintln!("tachi-bar is already running — exiting.");
                 return;
             };
+            // Launched from the .app wrapper with an agent installed: hand off
+            // to launchd instead of running un-managed, so KeepAlive (and a
+            // fresh code requirement) stay attached without the user having to
+            // remember to hit Restart. Our lock releases on return; the
+            // reload's sleep outlasts it.
+            if std::env::var_os(FROM_APP_ENV).is_some()
+                && agent::is_installed()
+                && agent::reload_detached()
+            {
+                return;
+            }
             ui::run(); // never returns; the lock lives as long as the process
         }
     }
@@ -40,6 +57,10 @@ fn main() {
 /// (released when the old process exits); a plain second launch gives up
 /// immediately.
 const WAIT_LOCK_ENV: &str = "TACHI_BAR_WAIT_LOCK";
+
+/// Set by the .app wrapper's stub so a Spotlight launch can be told apart
+/// from a terminal one (and handed off to launchd when the agent exists).
+const FROM_APP_ENV: &str = "TACHI_BAR_LAUNCHED_FROM_APP";
 
 /// Exclusive advisory lock; the returned file must stay alive for the
 /// process lifetime.
@@ -67,17 +88,14 @@ fn acquire_single_instance_lock() -> Option<std::fs::File> {
 }
 
 /// Replace this process with a fresh one (menu: Restart Tachi Bar).
-/// When launchd manages this very process, kickstart keeps the KeepAlive
-/// crash recovery attached to the successor; otherwise hand over to a
-/// spawned copy that waits for our instance lock.
+/// When the launch agent is installed, fully reload it (bootout + bootstrap)
+/// so the successor stays launchd-managed; otherwise hand over to a spawned
+/// copy that waits for our instance lock.
 fn restart() {
-    if agent::launchd_runs_us() {
-        let status = std::process::Command::new("/bin/launchctl")
-            .args(["kickstart", "-k", &format!("gui/{}/{}", agent::uid(), agent::LABEL)])
-            .status();
-        if status.map(|s| s.success()).unwrap_or(false) {
-            return; // launchd kills and respawns us momentarily
-        }
+    if agent::is_installed() && agent::reload_detached() {
+        // Exit 0 releases the instance lock without tripping KeepAlive
+        // (SuccessfulExit=false); the reload's bootstrap respawns us.
+        std::process::exit(0);
     }
     match std::env::current_exe() {
         Ok(exe) => {
@@ -116,6 +134,7 @@ mod agent {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ProcessType</key><string>Interactive</string>
+  <key>AbandonProcessGroup</key><true/>
 </dict></plist>
 "#
         )
@@ -134,20 +153,28 @@ mod agent {
         plist_path().exists()
     }
 
-    /// True when the loaded launchd service's pid is this very process —
-    /// only then can `launchctl kickstart -k` restart us.
-    pub fn launchd_runs_us() -> bool {
-        let Ok(out) = Command::new("/bin/launchctl")
-            .args(["print", &format!("gui/{}/{LABEL}", uid())])
-            .output()
-        else {
-            return false;
-        };
-        if !out.status.success() {
-            return false;
-        }
-        let needle = format!("pid = {}", std::process::id());
-        String::from_utf8_lossy(&out.stdout).lines().any(|l| l.trim() == needle)
+    /// Reload the launch agent (bootout + bootstrap) from a detached shell.
+    /// Not `kickstart -k`: that reuses launchd's cached code requirement,
+    /// which goes stale when the binary is replaced (cargo install), and the
+    /// respawn then fails with EX_CONFIG until the agent is reloaded. The
+    /// shell is detached because bootout kills this process when launchd
+    /// manages it; the `sleep 1` lets the old instance release its lock
+    /// before RunAtLoad spawns the successor. `process_group(0)` is what
+    /// keeps the shell alive at all: when a launchd job exits, launchd
+    /// SIGKILLs the job's whole process group (AbandonProcessGroup defaults
+    /// to false), so a same-group child dies before it can bootstrap.
+    pub fn reload_detached() -> bool {
+        use std::os::unix::process::CommandExt;
+        let u = uid();
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "/bin/launchctl bootout gui/{u}/{LABEL}; sleep 1; /bin/launchctl bootstrap gui/{u} \"$0\""
+            ))
+            .arg(plist_path())
+            .process_group(0)
+            .spawn()
+            .is_ok()
     }
 
     pub fn install() {
@@ -192,6 +219,164 @@ mod agent {
             println!("Removed launch agent {LABEL}");
         } else {
             println!("Launch agent not installed — nothing to do.");
+        }
+    }
+}
+
+/// "Tachi Bar.app" wrapper in ~/Applications: Spotlight only indexes app
+/// bundles, not bare executables, so this is what makes tachi-bar launchable
+/// by name. The bundle's executable is a shell stub that execs the real
+/// binary, so `cargo install` updates apply without reinstalling the app.
+mod app {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    /// Tachi's portrait; converted to the bundle icon at install time.
+    const PORTRAIT: &[u8] = include_bytes!("../../assets/tachi.png");
+
+    const BUNDLE_ID: &str = "com.tachi-noti.bar";
+
+    pub fn bundle_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("Applications/Tachi Bar.app")
+    }
+
+    fn info_plist() -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>Tachi Bar</string>
+  <key>CFBundleDisplayName</key><string>Tachi Bar</string>
+  <key>CFBundleIdentifier</key><string>{BUNDLE_ID}</string>
+  <key>CFBundleExecutable</key><string>tachi-bar</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>tachi</string>
+  <key>CFBundleShortVersionString</key><string>{version}</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+"#,
+            version = env!("CARGO_PKG_VERSION")
+        )
+    }
+
+    /// Escape for interpolation inside a double-quoted sh string.
+    fn sh_escape(s: &str) -> String {
+        s.replace('\\', r"\\").replace('"', "\\\"").replace('$', "\\$").replace('`', "\\`")
+    }
+
+    pub fn install() {
+        let exe = match std::env::current_exe().and_then(|p| p.canonicalize()) {
+            Ok(p) => p.display().to_string(),
+            Err(e) => {
+                eprintln!("error: cannot resolve tachi-bar path: {e}");
+                std::process::exit(1);
+            }
+        };
+        let bundle = bundle_path();
+        if bundle.exists() && !is_ours(&bundle) {
+            eprintln!(
+                "error: {} exists but does not look like tachi-bar's bundle — not touching it.",
+                bundle.display()
+            );
+            std::process::exit(1);
+        }
+
+        // Stage in a dot-prefixed sibling and rename into place: Spotlight
+        // classifies a bundle the moment its directory appears, and one built
+        // in place gets stuck indexed as a plain folder (never as an app).
+        // Dot-paths are ignored by Spotlight, and the rename lands complete.
+        let staging = bundle.with_file_name(format!(".Tachi Bar.app.staging.{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        let macos = staging.join("Contents/MacOS");
+        let resources = staging.join("Contents/Resources");
+        for dir in [&macos, &resources] {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("error: cannot create {}: {e}", dir.display());
+                std::process::exit(1);
+            }
+        }
+        let stub = format!(
+            "#!/bin/sh\n{}=1 exec \"{}\" \"$@\"\n",
+            crate::FROM_APP_ENV,
+            sh_escape(&exe)
+        );
+        let stub_path = macos.join("tachi-bar");
+        if std::fs::write(staging.join("Contents/Info.plist"), info_plist()).is_err()
+            || std::fs::write(staging.join("Contents/PkgInfo"), "APPL????").is_err()
+            || std::fs::write(&stub_path, stub).is_err()
+        {
+            let _ = std::fs::remove_dir_all(&staging);
+            eprintln!("error: cannot write into {}", staging.display());
+            std::process::exit(1);
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755));
+
+        // Icon: png → icns via sips. Best-effort — the app works without it.
+        let png = resources.join("tachi-portrait.png");
+        if std::fs::write(&png, PORTRAIT).is_ok() {
+            let _ = Command::new("/usr/bin/sips")
+                .args(["-s", "format", "icns"])
+                .arg(&png)
+                .arg("--out")
+                .arg(resources.join("tachi.icns"))
+                .output();
+            let _ = std::fs::remove_file(&png);
+        }
+
+        if bundle.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&bundle) {
+                let _ = std::fs::remove_dir_all(&staging);
+                eprintln!("error: cannot replace {}: {e}", bundle.display());
+                std::process::exit(1);
+            }
+        }
+        if let Err(e) = std::fs::rename(&staging, &bundle) {
+            let _ = std::fs::remove_dir_all(&staging);
+            eprintln!("error: cannot move bundle into {}: {e}", bundle.display());
+            std::process::exit(1);
+        }
+
+        // Nudge LaunchServices so Spotlight picks the app up immediately.
+        let _ = Command::new(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+        )
+        .arg("-f")
+        .arg(&bundle)
+        .output();
+
+        println!("Installed {} — Spotlight can now launch \u{201c}Tachi Bar\u{201d}.", bundle.display());
+    }
+
+    /// True when the bundle's Info.plist carries our bundle identifier.
+    fn is_ours(bundle: &std::path::Path) -> bool {
+        std::fs::read_to_string(bundle.join("Contents/Info.plist"))
+            .map(|s| s.contains(BUNDLE_ID))
+            .unwrap_or(false)
+    }
+
+    pub fn uninstall() {
+        let bundle = bundle_path();
+        // Only delete a bundle that is verifiably ours.
+        if !is_ours(&bundle) {
+            if bundle.exists() {
+                eprintln!(
+                    "error: {} exists but does not look like tachi-bar's bundle — not touching it.",
+                    bundle.display()
+                );
+                std::process::exit(1);
+            }
+            println!("App wrapper not installed — nothing to do.");
+            return;
+        }
+        match std::fs::remove_dir_all(&bundle) {
+            Ok(()) => println!("Removed {}", bundle.display()),
+            Err(e) => {
+                eprintln!("error: cannot remove {}: {e}", bundle.display());
+                std::process::exit(1);
+            }
         }
     }
 }
