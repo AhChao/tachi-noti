@@ -126,16 +126,16 @@ fn background_running(input: &HookInput) -> bool {
 }
 
 fn on_stop(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<()> {
-    // State first: the transition must happen even if the popup is suppressed.
-    let t = transition(ctx, state::Event::Stop);
-    let duration = t.transition.task_duration;
-
     // Background tasks (subagents / background bash) still running: this Stop is
-    // the main turn yielding, not the task finishing. Stay silent and log
+    // the main turn yielding, not the task finishing. The transition keeps the
+    // current status (the dot stays green, not silently Idle) and we log
     // nothing — the real final Stop (background_tasks drained) rings once.
-    if background_running(input) {
+    let bg = background_running(input);
+    let t = transition(ctx, state::Event::Stop { background_running: bg });
+    if bg {
         return Ok(());
     }
+    let duration = t.transition.task_duration;
 
     if cfg.min_duration_secs > 0 {
         // Only suppress when we positively know the turn was quick.

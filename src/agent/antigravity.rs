@@ -57,7 +57,7 @@ pub fn ingest(event: Option<&str>) -> Result<()> {
             hook::transition(&ctx, state::Event::PostToolUse { tool_name: tool });
         }
         Some("stop") => {
-            hook::transition(&ctx, state::Event::Stop);
+            hook::transition(&ctx, state::Event::Stop { background_running: false });
             let cfg = config::load();
             if cfg.focus_suppression && focus::session_is_frontmost() {
                 return Ok(());

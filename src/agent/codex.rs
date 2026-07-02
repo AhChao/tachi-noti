@@ -54,7 +54,7 @@ fn handle(n: &Notify) {
     let ctx = build_ctx(n);
     // Turn finished → Idle. Codex gives no turn-start signal, so we never show
     // it Running; duration is unknown (no task_started_at) and stays absent.
-    hook::transition(&ctx, state::Event::Stop);
+    hook::transition(&ctx, state::Event::Stop { background_running: false });
 
     if cfg.focus_suppression && focus::session_is_frontmost() {
         return;

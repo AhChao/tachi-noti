@@ -94,7 +94,9 @@ pub struct Ctx {
 pub enum Event<'a> {
     SessionStart { source: Option<&'a str> },
     PromptSubmit,
-    Stop,
+    /// `background_running` = the Stop hook reported subagents / background
+    /// bash still in flight, so the session isn't actually done.
+    Stop { background_running: bool },
     /// `authoritative` = structured source (PermissionRequest/PreToolUse) that
     /// may overwrite an equal-rank detail; the generic Notification may not.
     Waiting { info: WaitingInfo, authoritative: bool },
@@ -170,7 +172,16 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
             s.task_started_at = Some(now);
             Transition { save: Some(s), task_duration: None }
         }
-        Event::Stop => {
+        Event::Stop { background_running } => {
+            if background_running {
+                // The main turn yielded but background work is still running:
+                // a heartbeat, not the task ending. Keep status (Running stays
+                // green; a Waiting from a subagent's permission prompt stays
+                // yellow) and task_started_at, so the final Stop — after the
+                // background tasks drain — reports the full duration.
+                let s = prev.map(carry).unwrap_or_else(|| fresh(Status::Running));
+                return Transition { save: Some(s), task_duration: None };
+            }
             let mut s = set_status(prev.map(carry).unwrap_or_else(|| fresh(Status::Idle)), Status::Idle);
             let duration = s
                 .task_started_at
@@ -377,7 +388,7 @@ mod tests {
         assert_eq!(s.status, Status::Running, "answered permission resumes running");
         assert_eq!(s.waiting, None, "leaving Waiting clears the reason");
 
-        let t = apply_event(Some(s), &c, Event::Stop, 310, Some(0));
+        let t = apply_event(Some(s), &c, Event::Stop { background_running: false }, 310, Some(0));
         let s = t.save.unwrap();
         assert_eq!(s.status, Status::Idle);
         assert_eq!(t.task_duration, Some(Duration::from_secs(200)));
@@ -499,7 +510,7 @@ mod tests {
         // An old state file without pid gets it backfilled on the next event…
         let mut old = s.clone();
         old.pid = None;
-        let s2 = apply_event(Some(old), &c, Event::Stop, 110, Some(0)).save.unwrap();
+        let s2 = apply_event(Some(old), &c, Event::Stop { background_running: false }, 110, Some(0)).save.unwrap();
         assert_eq!(s2.pid, Some(4242));
         // …and a pid-less ctx (host undetectable) never erases a known pid.
         let mut blind = ctx("s9");
@@ -527,11 +538,48 @@ mod tests {
     }
 
     #[test]
+    fn background_stop_keeps_running_and_task_marker() {
+        let c = ctx("bg1");
+        let s = apply_event(None, &c, Event::PromptSubmit, 100, None).save.unwrap();
+        // Main turn yields while a subagent still runs: stay green, keep the task.
+        let t = apply_event(Some(s), &c, Event::Stop { background_running: true }, 200, Some(0));
+        let s = t.save.unwrap();
+        assert_eq!(s.status, Status::Running);
+        assert_eq!(s.task_started_at, Some(100));
+        assert_eq!(t.task_duration, None);
+        assert_eq!(s.last_event_at, 200, "still refreshes liveness");
+        // The final Stop (background drained) covers the whole span.
+        let t = apply_event(Some(s), &c, Event::Stop { background_running: false }, 400, Some(0));
+        assert_eq!(t.save.unwrap().status, Status::Idle);
+        assert_eq!(t.task_duration, Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn background_stop_preserves_waiting() {
+        let c = ctx("bg2");
+        // A background subagent's permission prompt is pending when the main
+        // turn yields — the yellow blocked signal must survive the Stop.
+        let s = apply_event(None, &c, waiting_auth(WaitKind::Permission, Some("cargo test")), 100, None)
+            .save
+            .unwrap();
+        let s = apply_event(Some(s), &c, Event::Stop { background_running: true }, 110, Some(0)).save.unwrap();
+        assert_eq!(s.status, Status::Waiting);
+        assert_eq!(s.waiting.as_ref().unwrap().detail.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn background_stop_without_prior_state_shows_running() {
+        let c = ctx("bg3");
+        let s = apply_event(None, &c, Event::Stop { background_running: true }, 100, None).save.unwrap();
+        assert_eq!(s.status, Status::Running, "work is known to be in flight");
+    }
+
+    #[test]
     fn stop_discards_implausible_duration() {
         let c = ctx("s5");
         let mut s = apply_event(None, &c, Event::PromptSubmit, 100, None).save.unwrap();
         s.task_started_at = Some(999_999); // future start (clock skew)
-        let t = apply_event(Some(s), &c, Event::Stop, 200, Some(0));
+        let t = apply_event(Some(s), &c, Event::Stop { background_running: false }, 200, Some(0));
         assert_eq!(t.task_duration, None);
     }
 
