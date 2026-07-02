@@ -6,6 +6,7 @@
 use crate::state;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -15,11 +16,23 @@ pub struct Window {
     pub resets_at: u64,
 }
 
+/// Last-seen activity fingerprint of one statusline-pushing session.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Writer {
+    pub fp: String,
+    /// When the fingerprint last changed (unix seconds) — prune key.
+    pub at: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Usage {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
     pub updated_at: u64,
+    /// session_id → activity fingerprint. A session whose fingerprint just
+    /// changed got a fresh API response, so its rate_limits are current.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub writers: HashMap<String, Writer>,
 }
 
 pub fn usage_path() -> PathBuf {
@@ -41,38 +54,80 @@ pub fn save_from_statusline(payload: &Value) {
     save_from_statusline_at(&usage_path(), payload, state::now_epoch());
 }
 
-/// Every live session's statusline re-pushes ITS last-known snapshot each
-/// second — idle sessions push hours-old numbers. Accept a window only when
-/// it advances: a later reset boundary, or a higher percentage within the
-/// same boundary. Stale writers can never clobber fresh data.
-fn advance(prev: Option<Window>, new: Option<Window>) -> (Option<Window>, bool) {
-    match (prev, new) {
-        (None, n) => (n, n.is_some()),
-        (p, None) => (p, false),
-        (Some(p), Some(n)) => {
-            if n.resets_at > p.resets_at || (n.resets_at == p.resets_at && n.used_percentage >= p.used_percentage) {
-                (Some(n), true)
-            } else {
-                (Some(p), false)
-            }
-        }
-    }
+/// API-activity counters: they move exactly when the session receives an API
+/// response (wall-clock total_duration_ms ticks every render and must NOT be
+/// in here — a two-week-old zombie session ticks it every second while
+/// re-pushing rate limits whose reset boundary passed days ago). None when
+/// the payload has no usable cost block (older Claude Code).
+fn fingerprint(payload: &Value) -> Option<String> {
+    let cost = &payload["cost"];
+    let usd = cost["total_cost_usd"].as_f64()?;
+    let api_ms = cost["total_api_duration_ms"].as_f64().unwrap_or(0.0);
+    Some(format!("{usd}:{api_ms}"))
 }
 
+fn is_expired(w: &Window, now: u64) -> bool {
+    // resets_at == 0 = payload carried no boundary; tolerated, can't be gated.
+    w.resets_at != 0 && w.resets_at <= now
+}
+
+const WRITER_TTL_SECS: u64 = 48 * 3600;
+
+/// Gate order for pushed windows — there is deliberately NO percentage
+/// ratchet: idle sessions re-push hours-old snapshots every second, and a
+/// percentage comparison cannot tell a stale high from a fresh low (the
+/// weekly quota provably gets re-graded downward mid-window).
+///
+/// 1. A window whose reset boundary already passed is dropped outright —
+///    a genuine current window always resets in the future. This also makes
+///    official rollovers self-cleaning: pre-rollover re-pushes expire.
+/// 2. A session whose API-activity fingerprint changed since its previous
+///    push ("authoritative") just got an API response, so its rate_limits
+///    are at most one render old — accepted wholesale, decreases included.
+///    First sighting of a session is recorded but NOT trusted: it may be a
+///    long-idle re-pusher we simply hadn't tracked yet.
+/// 3. Anything else may only fill an empty slot or replace one whose own
+///    boundary expired — never overwrite live data.
 fn save_from_statusline_at(path: &Path, payload: &Value, now: u64) {
     let limits = &payload["rate_limits"];
-    let new_five = window(&limits["five_hour"]);
-    let new_seven = window(&limits["seven_day"]);
+    let new_five = window(&limits["five_hour"]).filter(|w| !is_expired(w, now));
+    let new_seven = window(&limits["seven_day"]).filter(|w| !is_expired(w, now));
     if new_five.is_none() && new_seven.is_none() {
         return;
     }
-    let prev = load_from(path).unwrap_or_default();
-    let (five_hour, adv5) = advance(prev.five_hour, new_five);
-    let (seven_day, adv7) = advance(prev.seven_day, new_seven);
-    if !adv5 && !adv7 {
-        return; // pure stale re-push — don't even touch the file
+    let mut prev = load_from(path).unwrap_or_default();
+
+    let session = payload["session_id"].as_str().unwrap_or("");
+    let mut authoritative = false;
+    let mut writers_changed = false;
+    if let (false, Some(fp)) = (session.is_empty(), fingerprint(payload)) {
+        match prev.writers.get(session) {
+            Some(w) if w.fp == fp => {} // unchanged → plain re-push
+            seen => {
+                authoritative = seen.is_some();
+                writers_changed = true;
+                prev.writers.insert(session.to_string(), Writer { fp, at: now });
+                prev.writers.retain(|_, w| now.saturating_sub(w.at) < WRITER_TTL_SECS);
+            }
+        }
     }
-    let usage = Usage { five_hour, seven_day, updated_at: now };
+
+    let place = |slot: Option<Window>, new: Option<Window>| -> (Option<Window>, bool) {
+        match (slot, new) {
+            (s, None) => (s, false),
+            (_, n) if authoritative => (n, true), // fresh data, even when lower
+            (None, n) => (n, true),               // bootstrap an empty slot
+            (Some(s), n) if is_expired(&s, now) => (n, true),
+            (s, _) => (s, false),                 // live data beats a re-push
+        }
+    };
+    let (five_hour, acc5) = place(prev.five_hour, new_five);
+    let (seven_day, acc7) = place(prev.seven_day, new_seven);
+    if !acc5 && !acc7 && !writers_changed {
+        return; // nothing accepted — don't even touch the file
+    }
+    let updated_at = if acc5 || acc7 { now } else { prev.updated_at };
+    let usage = Usage { five_hour, seven_day, updated_at, writers: prev.writers };
     let Some(dir) = path.parent() else { return };
     if std::fs::create_dir_all(dir).is_err() {
         return;
@@ -154,7 +209,7 @@ mod tests {
         let p = tmppath("keep");
         save_from_statusline_at(
             &p,
-            &json!({"rate_limits": {"five_hour": {"used_percentage": 50.0, "resets_at": 7}}}),
+            &json!({"rate_limits": {"five_hour": {"used_percentage": 50.0, "resets_at": 7000}}}),
             1000,
         );
         save_from_statusline_at(&p, &json!({"model": {"id": "x"}, "rate_limits": null}), 2000);
@@ -164,41 +219,152 @@ mod tests {
     }
 
     #[test]
-    fn stale_session_repush_cannot_clobber_fresh_data() {
-        let p = tmppath("stale");
+    fn expired_windows_never_land() {
+        let p = tmppath("zombie");
         let _ = std::fs::remove_file(&p);
-        // Active session writes fresh data (current window, 20%).
+        // A zombie session re-pushes rate limits whose boundaries passed days
+        // ago — even into an EMPTY file this must not land.
+        save_from_statusline_at(
+            &p,
+            &json!({"session_id": "zombie", "cost": {"total_cost_usd": 0.0},
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 20.0, "resets_at": 500},
+                    "seven_day": {"used_percentage": 60.0, "resets_at": 800}
+                }}),
+            1000,
+        );
+        assert!(load_from(&p).is_none(), "expired-only push must not create the file");
+    }
+
+    #[test]
+    fn repush_cannot_clobber_live_data_but_replaces_expired() {
+        let p = tmppath("gate");
+        let _ = std::fs::remove_file(&p);
+        // Active session bootstraps fresh data.
         save_from_statusline_at(
             &p,
             &json!({"rate_limits": {
                 "five_hour": {"used_percentage": 20.0, "resets_at": 2000},
-                "seven_day": {"used_percentage": 29.0, "resets_at": 9000}
+                "seven_day": {"used_percentage": 4.0, "resets_at": 9000}
             }}),
             1000,
         );
-        // Idle session re-pushes an hours-old snapshot (earlier window, lower %).
+        // A woken idle session's first push carries yesterday's cached weekly
+        // HIGH for the same window — live data must win (no ratchet).
         save_from_statusline_at(
             &p,
-            &json!({"rate_limits": {
-                "five_hour": {"used_percentage": 10.0, "resets_at": 500},
-                "seven_day": {"used_percentage": 9.0, "resets_at": 9000}
-            }}),
+            &json!({"session_id": "idle", "cost": {"total_cost_usd": 9.0},
+                "rate_limits": {"seven_day": {"used_percentage": 32.0, "resets_at": 9000}}}),
             1001,
         );
         let u = load_from(&p).unwrap();
-        assert_eq!(u.five_hour.unwrap().used_percentage, 20.0, "older window rejected");
-        assert_eq!(u.seven_day.unwrap().used_percentage, 29.0, "same window, lower pct rejected");
-        assert_eq!(u.updated_at, 1000, "pure stale push doesn't touch the file");
-        // Window rollover: later resets_at wins even with a lower percentage.
+        assert_eq!(u.seven_day.unwrap().used_percentage, 4.0, "stale high rejected");
+        // Rollover: once the stored 5h window expires, a re-push carrying the
+        // NEW window replaces it even without authority.
         save_from_statusline_at(
             &p,
             &json!({"rate_limits": {"five_hour": {"used_percentage": 1.0, "resets_at": 20000}}}),
-            1002,
+            2500,
         );
         let u = load_from(&p).unwrap();
-        assert_eq!(u.five_hour.unwrap().used_percentage, 1.0);
-        assert_eq!(u.seven_day.unwrap().used_percentage, 29.0, "untouched window survives");
-        assert_eq!(u.updated_at, 1002);
+        assert_eq!(u.five_hour.unwrap().used_percentage, 1.0, "expired slot replaced");
+        assert_eq!(u.seven_day.unwrap().used_percentage, 4.0, "untouched window survives");
+        assert_eq!(u.updated_at, 2500);
+    }
+
+    #[test]
+    fn wall_clock_tick_is_not_api_activity() {
+        let p = tmppath("wallclock");
+        let _ = std::fs::remove_file(&p);
+        let push = |pct: f64, dur_ms: f64, at: u64| {
+            save_from_statusline_at(
+                &p,
+                &json!({"session_id": "s1",
+                    "cost": {"total_cost_usd": 1.0, "total_api_duration_ms": 500.0,
+                             "total_duration_ms": dur_ms},
+                    "rate_limits": {"seven_day": {"used_percentage": pct, "resets_at": 9000}}}),
+                at,
+            );
+        };
+        push(30.0, 100.0, 100); // bootstrap
+        push(2.0, 200.0, 101); // only wall-clock moved → NOT authoritative
+        let u = load_from(&p).unwrap();
+        assert_eq!(u.seven_day.unwrap().used_percentage, 30.0, "wall tick grants no authority");
+    }
+
+    #[test]
+    fn active_session_decrease_is_accepted() {
+        let p = tmppath("regrade");
+        let _ = std::fs::remove_file(&p);
+        let push = |pct: f64, cost: f64, at: u64| {
+            save_from_statusline_at(
+                &p,
+                &json!({
+                    "session_id": "s1",
+                    "cost": {"total_cost_usd": cost},
+                    "rate_limits": {"seven_day": {"used_percentage": pct, "resets_at": 9000}}
+                }),
+                at,
+            );
+        };
+        push(32.0, 1.0, 100); // first sighting: registered, value lands (empty file)
+        push(4.0, 1.0, 101); // same cost → re-push → ratchet keeps 32
+        let u = load_from(&p).unwrap();
+        assert_eq!(u.seven_day.unwrap().used_percentage, 32.0);
+        push(4.0, 2.0, 102); // cost moved → fresh API turn → decrease accepted
+        let u = load_from(&p).unwrap();
+        assert_eq!(u.seven_day.unwrap().used_percentage, 4.0, "quota re-grade must land");
+        assert_eq!(u.updated_at, 102);
+    }
+
+    #[test]
+    fn unseen_session_is_recorded_but_not_trusted() {
+        let p = tmppath("unseen");
+        let _ = std::fs::remove_file(&p);
+        save_from_statusline_at(
+            &p,
+            &json!({
+                "session_id": "fresh",
+                "cost": {"total_cost_usd": 5.0},
+                "rate_limits": {"seven_day": {"used_percentage": 30.0, "resets_at": 9000}}
+            }),
+            100,
+        );
+        // A long-idle session's first observed push must not lower fresh data.
+        save_from_statusline_at(
+            &p,
+            &json!({
+                "session_id": "idle-old",
+                "cost": {"total_cost_usd": 9.0},
+                "rate_limits": {"seven_day": {"used_percentage": 2.0, "resets_at": 9000}}
+            }),
+            101,
+        );
+        let u = load_from(&p).unwrap();
+        assert_eq!(u.seven_day.unwrap().used_percentage, 30.0);
+        assert_eq!(u.writers.len(), 2, "both sessions tracked");
+    }
+
+    #[test]
+    fn writers_are_pruned_after_ttl() {
+        let p = tmppath("prune");
+        let _ = std::fs::remove_file(&p);
+        let push = |sid: &str, cost: f64, at: u64| {
+            save_from_statusline_at(
+                &p,
+                &json!({
+                    "session_id": sid,
+                    "cost": {"total_cost_usd": cost},
+                    "rate_limits": {"five_hour": {"used_percentage": 10.0, "resets_at": at + 1000}}
+                }),
+                at,
+            );
+        };
+        push("old", 1.0, 100);
+        push("new", 1.0, 100 + WRITER_TTL_SECS + 1);
+        let u = load_from(&p).unwrap();
+        assert!(!u.writers.contains_key("old"), "expired writer dropped");
+        assert!(u.writers.contains_key("new"));
     }
 
     #[test]

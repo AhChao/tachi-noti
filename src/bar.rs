@@ -386,6 +386,7 @@ mod tests {
             five_hour: Some(Window { used_percentage: 37.4, resets_at: 10_000 }),
             seven_day: Some(Window { used_percentage: 81.0, resets_at: 200_000 }),
             updated_at: 1_000,
+            writers: Default::default(),
         };
         let lines = usage_lines(&u, 1_180);
         assert_eq!(lines.len(), 3);
