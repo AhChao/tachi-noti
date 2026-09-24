@@ -16,12 +16,22 @@ pub struct Window {
     pub resets_at: u64,
 }
 
-/// Last-seen activity fingerprint of one statusline-pushing session.
+/// Last-seen activity fingerprint of one statusline-pushing stream — one
+/// Claude Code process. A session_id is NOT a process: resuming a session in
+/// a new process while the old one still runs yields two streams under one
+/// id, each with its own cost counters, and they must be tracked apart.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Writer {
     pub fp: String,
     /// When the fingerprint last changed (unix seconds) — prune key.
     pub at: u64,
+    /// Owning session_id (the map key also carries the process start).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session: String,
+    /// Process start (unix seconds) derived from total_duration_ms; None for
+    /// payloads that don't carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -29,7 +39,7 @@ pub struct Usage {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
     pub updated_at: u64,
-    /// session_id → activity fingerprint. A session whose fingerprint just
+    /// stream key → activity fingerprint. A stream whose fingerprint just
     /// changed got a fresh API response, so its rate_limits are current.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub writers: HashMap<String, Writer>,
@@ -66,6 +76,31 @@ fn fingerprint(payload: &Value) -> Option<String> {
     Some(format!("{usd}:{api_ms}"))
 }
 
+/// Unix second the pushing process started: `now − total_duration_ms`. This
+/// is stable across one process's renders (only rounding jitter) and differs
+/// between two processes sharing a session_id, so it tells them apart.
+fn process_start(payload: &Value, now: u64) -> Option<u64> {
+    let dur_ms = payload["cost"]["total_duration_ms"].as_f64()?;
+    Some(now.saturating_sub((dur_ms / 1000.0) as u64))
+}
+
+/// Two derived starts this close are the same process (second rounding of
+/// `now`, render latency, a slow hook spawn).
+const START_SLOP_SECS: u64 = 30;
+
+/// Map key of the stream that pushed `payload`: an existing writer of the
+/// same session whose start is within the slop, else a new
+/// `session@start` key. Payloads without a duration fall back to the bare
+/// session_id.
+fn stream_key(writers: &HashMap<String, Writer>, session: &str, start: Option<u64>) -> String {
+    let Some(start) = start else { return session.to_string() };
+    writers
+        .iter()
+        .find(|(_, w)| w.session == session && w.start.is_some_and(|s| s.abs_diff(start) <= START_SLOP_SECS))
+        .map(|(k, _)| k.clone())
+        .unwrap_or_else(|| format!("{session}@{start}"))
+}
+
 fn is_expired(w: &Window, now: u64) -> bool {
     // resets_at == 0 = payload carried no boundary; tolerated, can't be gated.
     w.resets_at != 0 && w.resets_at <= now
@@ -84,8 +119,13 @@ const WRITER_TTL_SECS: u64 = 48 * 3600;
 /// 2. A session whose API-activity fingerprint changed since its previous
 ///    push ("authoritative") just got an API response, so its rate_limits
 ///    are at most one render old — accepted wholesale, decreases included.
-///    First sighting of a session is recorded but NOT trusted: it may be a
+///    First sighting of a stream is recorded but NOT trusted: it may be a
 ///    long-idle re-pusher we simply hadn't tracked yet.
+///    Streams are keyed per PROCESS (session_id + derived process start),
+///    not per session_id: a session resumed in a second process while the
+///    first still runs pushes two alternating frozen fingerprints under one
+///    id, and keyed by session_id alone every alternation looked like a
+///    fresh API response — a 17-hour-old 88% kept overwriting a live 94%.
 /// 3. Anything else may only fill an empty slot or replace one whose own
 ///    boundary expired — never overwrite live data.
 fn save_from_statusline_at(path: &Path, payload: &Value, now: u64) {
@@ -95,18 +135,29 @@ fn save_from_statusline_at(path: &Path, payload: &Value, now: u64) {
     if new_five.is_none() && new_seven.is_none() {
         return;
     }
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    // Every live session pushes every second: serialize load → modify →
+    // rename, or a writers-only update built from a stale read clobbers a
+    // fresh value another process just wrote.
+    let _lock = lock(path);
     let mut prev = load_from(path).unwrap_or_default();
 
     let session = payload["session_id"].as_str().unwrap_or("");
     let mut authoritative = false;
     let mut writers_changed = false;
     if let (false, Some(fp)) = (session.is_empty(), fingerprint(payload)) {
-        match prev.writers.get(session) {
+        let start = process_start(payload, now);
+        let key = stream_key(&prev.writers, session, start);
+        match prev.writers.get(&key) {
             Some(w) if w.fp == fp => {} // unchanged → plain re-push
             seen => {
                 authoritative = seen.is_some();
                 writers_changed = true;
-                prev.writers.insert(session.to_string(), Writer { fp, at: now });
+                let session = session.to_string();
+                prev.writers.insert(key, Writer { fp, at: now, session, start });
                 prev.writers.retain(|_, w| now.saturating_sub(w.at) < WRITER_TTL_SECS);
             }
         }
@@ -128,16 +179,27 @@ fn save_from_statusline_at(path: &Path, payload: &Value, now: u64) {
     }
     let updated_at = if acc5 || acc7 { now } else { prev.updated_at };
     let usage = Usage { five_hour, seven_day, updated_at, writers: prev.writers };
-    let Some(dir) = path.parent() else { return };
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
     let Ok(json) = serde_json::to_string(&usage) else { return };
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = dir.join(format!(".{name}.tmp.{}", std::process::id()));
     if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+}
+
+/// Exclusive advisory lock beside `path`, released on drop. Best-effort: if
+/// the lock file can't be opened we proceed unlocked rather than drop data.
+fn lock(path: &Path) -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_file_name(format!(".{name}.lock")))
+        .ok()?;
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+    (rc == 0).then_some(f)
 }
 
 fn window(v: &Value) -> Option<Window> {
@@ -343,6 +405,73 @@ mod tests {
         let u = load_from(&p).unwrap();
         assert_eq!(u.seven_day.unwrap().used_percentage, 30.0);
         assert_eq!(u.writers.len(), 2, "both sessions tracked");
+    }
+
+    /// One statusline push from a process started at `start` (unix secs).
+    fn push_proc(p: &Path, sid: &str, start: u64, cost: f64, pct: f64, now: u64) {
+        save_from_statusline_at(
+            p,
+            &json!({"session_id": sid,
+                "cost": {"total_cost_usd": cost, "total_duration_ms": ((now - start) * 1000) as f64},
+                "rate_limits": {"seven_day": {"used_percentage": pct, "resets_at": 2_000_000}}}),
+            now,
+        );
+    }
+
+    #[test]
+    fn forked_session_streams_cannot_clobber_live_data() {
+        // Observed: session b2420100 pushed from two processes — a 9-day-old
+        // one frozen at cost 90.724 / 88%, and a resumed one frozen at
+        // 54.014 / 93% — alternating every few seconds, while other sessions
+        // were live at 94%.
+        let p = tmppath("forked");
+        let _ = std::fs::remove_file(&p);
+        let t0 = 1_000_000;
+        push_proc(&p, "live", t0 - 60, 1.0, 93.0, t0);
+        push_proc(&p, "live", t0 - 60, 2.0, 94.0, t0 + 1); // fresh API turn
+        assert_eq!(load_from(&p).unwrap().seven_day.unwrap().used_percentage, 94.0);
+        let (old_start, resumed_start) = (t0 - 9 * 86_400, t0 - 7_000);
+        for i in 0..10 {
+            let now = t0 + 2 + i * 2;
+            push_proc(&p, "b2420100", old_start, 90.724, 88.0, now);
+            push_proc(&p, "b2420100", resumed_start, 54.014, 93.0, now + 1);
+        }
+        let u = load_from(&p).unwrap();
+        assert_eq!(u.seven_day.unwrap().used_percentage, 94.0, "frozen streams must not overwrite");
+        assert_eq!(u.writers.values().filter(|w| w.session == "b2420100").count(), 2);
+    }
+
+    #[test]
+    fn resumed_process_regains_authority_despite_lower_counters() {
+        // A resumed process restarts its cost counter below the old
+        // process's; it must still earn authority on its own first API turn.
+        let p = tmppath("resumed");
+        let _ = std::fs::remove_file(&p);
+        let t0 = 1_000_000;
+        push_proc(&p, "s", t0 - 86_400, 90.0, 50.0, t0); // old process
+        push_proc(&p, "s", t0 - 86_400, 91.0, 60.0, t0 + 1); // live → 60
+        push_proc(&p, "s", t0 - 5, 0.5, 70.0, t0 + 2); // resume: first sighting
+        assert_eq!(load_from(&p).unwrap().seven_day.unwrap().used_percentage, 60.0);
+        push_proc(&p, "s", t0 - 5, 0.8, 55.0, t0 + 3); // resumed process's API turn
+        push_proc(&p, "s", t0 - 86_400, 91.0, 60.0, t0 + 4); // old one re-pushes
+        let u = load_from(&p).unwrap();
+        assert_eq!(u.seven_day.unwrap().used_percentage, 55.0, "decrease from new process lands");
+    }
+
+    #[test]
+    fn start_jitter_stays_one_stream() {
+        let p = tmppath("jitter");
+        let _ = std::fs::remove_file(&p);
+        push_proc(&p, "s", 1000, 1.0, 10.0, 5000);
+        push_proc(&p, "s", 1003, 1.0, 10.0, 5001); // rounding/latency drift
+        assert_eq!(load_from(&p).unwrap().writers.len(), 1);
+    }
+
+    #[test]
+    fn legacy_writer_entries_still_load() {
+        let p = tmppath("legacy");
+        std::fs::write(&p, r#"{"updated_at":1,"writers":{"s1":{"fp":"1:0","at":1}}}"#).unwrap();
+        assert!(load_from(&p).unwrap().writers["s1"].start.is_none());
     }
 
     #[test]
