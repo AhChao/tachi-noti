@@ -2,6 +2,8 @@
 //! renderable snapshot. No AppKit / Win32 here so it stays unit-testable and
 //! shared by both front ends.
 
+pub mod menu;
+
 use crate::platform;
 use crate::state::{SessionState, Status, WaitKind, format_duration};
 use std::time::Duration;
@@ -21,11 +23,14 @@ pub struct Snapshot {
 }
 
 pub struct Group {
+    /// repo root (fallback cwd) the sessions were grouped by.
+    pub key: String,
     pub header: String,
     pub rows: Vec<Row>,
 }
 
 pub struct Row {
+    pub session_id: String,
     pub status: Status,
     pub label: String,
     /// Full waiting detail for hover (label only carries a truncated hint).
@@ -95,7 +100,7 @@ pub fn build_snapshot(states: Vec<SessionState>, now: u64) -> Snapshot {
         .map(|(key, header, mut members)| {
             members.sort_by_key(|s| (status_rank(s.status), std::cmp::Reverse(s.last_event_at)));
             let rows = members.iter().map(|s| build_row(s, &key, now)).collect();
-            Group { header, rows }
+            Group { key, header, rows }
         })
         .collect();
 
@@ -127,6 +132,7 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
         .filter(|b| platform::host::window_per_folder(b))
         .map(|_| group_key.to_string());
     Row {
+        session_id: s.session_id.clone(),
         status: s.status,
         label,
         tooltip: waiting_detail,
@@ -234,6 +240,10 @@ mod tests {
         );
         assert_eq!(snap.groups.len(), 2);
         assert_eq!(snap.groups[0].header, "beta @ main");
+        assert_eq!(snap.groups[0].key, "/r/beta");
+        assert_eq!(snap.groups[1].key, "/r/alpha");
+        assert_eq!(snap.groups[1].rows[0].session_id, "ccc333");
+        assert_eq!(snap.groups[1].rows[1].session_id, "aaa111");
         assert_eq!(snap.groups[1].header, "alpha @ main");
         assert_eq!(snap.groups[1].rows.len(), 2);
         // Waiting outranks idle within the group.

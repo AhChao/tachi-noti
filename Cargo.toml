@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "tachi-bar"
-path = "src/bin/tachi-bar.rs"
+path = "src/bin/tachi-bar/main.rs"
 required-features = ["bar"]
 
 [features]
