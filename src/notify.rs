@@ -24,6 +24,8 @@ pub struct Notice {
     pub activate: Option<String>,
     /// Project folder for window-precise click focus.
     pub click_path: Option<String>,
+    /// Window token of the session's own window (see `state::SessionState::window`).
+    pub window: Option<String>,
     /// Image path shown on the notification.
     pub icon: Option<String>,
 }

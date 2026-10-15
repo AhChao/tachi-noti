@@ -37,6 +37,8 @@ pub struct Row {
     pub tooltip: Option<String>,
     pub bundle_id: Option<String>,
     pub open_path: Option<String>,
+    /// The session's own window token, when the platform records one.
+    pub window: Option<String>,
     pub enabled: bool,
 }
 
@@ -138,6 +140,7 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
         tooltip: waiting_detail,
         bundle_id: s.bundle_id.clone(),
         open_path,
+        window: s.window.clone(),
         enabled: s.bundle_id.is_some(),
     }
 }
@@ -225,6 +228,7 @@ mod tests {
             last_event_at,
             waiting: None,
             pid: None,
+            window: None,
         }
     }
 

@@ -20,22 +20,20 @@ pub fn frontmost_bundle_id() -> Option<String> {
 /// nearest match also picks the right session for nested invocations.
 /// None = couldn't tell (the session then only expires by time).
 pub fn agent_ancestor_pid(agent: crate::agent::AgentId) -> Option<u32> {
-    let mut pid = proc::self_parent_pid();
-    for _ in 0..15 {
-        if pid <= 1 {
-            return None;
-        }
-        if proc::exe_path(pid).map(|p| agent.matches_host(&p)).unwrap_or(false) {
-            return Some(pid);
-        }
-        pid = proc::parent_pid(pid)?;
-    }
-    None
+    proc::ancestors(std::process::id(), 15)
+        .into_iter()
+        .take_while(|&pid| pid > 1)
+        .find(|&pid| proc::exe_path(pid).map(|p| agent.matches_host(&p)).unwrap_or(false))
 }
 
-/// True when the session's host app is frontmost — the user is already looking
-/// at it, so skip the notification. Any uncertainty means "don't suppress".
-pub fn session_is_frontmost() -> bool {
+/// True when the user is already looking at the session, so skip the
+/// notification. With a window token (Windows) that means the session's own
+/// window is frontmost — another window of the same IDE doesn't count; without
+/// one, the host app being frontmost. Any uncertainty means "don't suppress".
+pub fn session_is_frontmost(window: Option<&str>) -> bool {
+    if let Some(answer) = window.and_then(host::window_frontmost) {
+        return answer;
+    }
     match (session_bundle_id(), frontmost_bundle_id()) {
         (Some(a), Some(b)) => host::same_host(&a, &b),
         _ => false,

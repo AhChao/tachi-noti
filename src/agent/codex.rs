@@ -56,7 +56,7 @@ fn handle(n: &Notify) {
     // it Running; duration is unknown (no task_started_at) and stays absent.
     hook::transition(&ctx, state::Event::Stop { background_running: false });
 
-    if cfg.focus_suppression && focus::session_is_frontmost() {
+    if cfg.focus_suppression && focus::session_is_frontmost(ctx.window.as_deref()) {
         return;
     }
     let body = n
@@ -79,14 +79,18 @@ fn build_ctx(n: &Notify) -> state::Ctx {
         .unwrap_or_else(|| PathBuf::from("."));
     let repo = gitinfo::detect(&cwd);
     let agent = AgentId::Codex;
+    // thread-id is stable across a Codex session, so it keys one state file;
+    // fall back to turn-id, then a constant, so we never panic.
+    let session_id = n
+        .thread_id
+        .clone()
+        .or_else(|| n.turn_id.clone())
+        .unwrap_or_else(|| "codex-unknown".into());
+    // Codex only reports turn completion — no moment when the user is known
+    // to be in the session's window — so only a saved token can apply.
+    let window = state::saved_window(&session_id);
     state::Ctx {
-        // thread-id is stable across a Codex session, so it keys one state file;
-        // fall back to turn-id, then a constant, so we never panic.
-        session_id: n
-            .thread_id
-            .clone()
-            .or_else(|| n.turn_id.clone())
-            .unwrap_or_else(|| "codex-unknown".into()),
+        session_id,
         agent,
         repo_name: repo.name,
         repo_root: repo.toplevel.map(|p| p.to_string_lossy().into_owned()),
@@ -94,6 +98,7 @@ fn build_ctx(n: &Notify) -> state::Ctx {
         bundle_id: focus::session_bundle_id(),
         cwd: cwd.to_string_lossy().into_owned(),
         pid: focus::agent_ancestor_pid(agent),
+        window,
     }
 }
 

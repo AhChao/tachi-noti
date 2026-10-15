@@ -72,9 +72,19 @@ pub fn window_per_folder_hook_hint() -> bool {
     std::env::var("TERM_PROGRAM").map(|t| t == "vscode").unwrap_or(false)
 }
 
+/// macOS has no public, permission-free handle for another app's window, so
+/// sessions carry no window token; focus is per app (or per folder).
+pub fn current_window_token(_host_id: Option<&str>) -> Option<String> {
+    None
+}
+
+pub fn window_frontmost(_token: &str) -> Option<bool> {
+    None
+}
+
 /// Focus the window hosting a session. VS Code-family apps get the folder path
 /// (window-precise); other apps a plain activation. argv-only, no shell.
-pub fn focus_host(host_id: &str, open_path: Option<&str>) {
+pub fn focus_host(host_id: &str, open_path: Option<&str>, _window: Option<&str>) {
     let mut cmd = Command::new("/usr/bin/open");
     cmd.arg("-b").arg(host_id);
     if let Some(p) = open_path {

@@ -16,9 +16,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F24,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, EnumWindows, FlashWindowEx, GetForegroundWindow, GetWindow,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow,
-    ASFW_ANY, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY, GW_OWNER, SW_RESTORE,
+    AllowSetForegroundWindow, EnumWindows, FlashWindowEx, GetAncestor, GetForegroundWindow,
+    GetWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    SetForegroundWindow, ShowWindow, ASFW_ANY, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY, GA_ROOT,
+    GW_OWNER, SW_RESTORE,
 };
 
 use super::proc;
@@ -176,10 +177,62 @@ fn select_host_window(windows: &[(isize, Option<String>)], host_id: &str) -> Opt
         .map(|(h, _)| *h)
 }
 
-/// Bring the session's window forward. VS Code-family hosts get the folder so
-/// the running instance focuses the window that already has it open; anything
-/// else gets its most recent top-level window raised. Errors are ignored.
-pub fn focus_host(host_id: &str, open_path: Option<&str>) {
+/// Window token: the decimal HWND of a top-level window; zero or garbage is rejected.
+fn parse_window_token(token: &str) -> Option<isize> {
+    token.trim().parse::<isize>().ok().filter(|h| *h != 0)
+}
+
+fn root_of(hwnd: HWND) -> HWND {
+    unsafe { GetAncestor(hwnd, GA_ROOT) }
+}
+
+/// Token of the window the user is in right now, only if it belongs to
+/// `host_id`; the user may have switched away before the hook ran, and a wrong
+/// window is worse than none.
+pub fn current_window_token(host_id: Option<&str>) -> Option<String> {
+    let host_id = host_id?;
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_invalid() {
+        return None;
+    }
+    let root = root_of(fg);
+    if root.is_invalid() {
+        return None;
+    }
+    let exe = path_string(proc::exe_path(window_pid(root)?)?);
+    same_host(&exe, host_id).then(|| (root.0 as isize).to_string())
+}
+
+/// `None` when the window is gone, so the caller falls back to app-level.
+pub fn window_frontmost(token: &str) -> Option<bool> {
+    let hwnd = to_hwnd(parse_window_token(token)?);
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return None;
+    }
+    let fg = unsafe { GetForegroundWindow() };
+    Some(!fg.is_invalid() && root_of(fg) == hwnd)
+}
+
+/// The token's window, if it still exists and still belongs to the host
+/// (HWND values get reused by other apps).
+fn live_token_window(token: &str, host_id: &str) -> Option<HWND> {
+    let hwnd = to_hwnd(parse_window_token(token)?);
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return None;
+    }
+    let exe = path_string(proc::exe_path(window_pid(hwnd)?)?);
+    same_host(&exe, host_id).then_some(hwnd)
+}
+
+/// Bring the session's window forward. A valid window token wins (exact
+/// window); otherwise VS Code-family hosts get the folder so the running
+/// instance focuses the window that already has it open, and anything else gets
+/// its most recent top-level window raised. Errors are ignored.
+pub fn focus_host(host_id: &str, open_path: Option<&str>, window: Option<&str>) {
+    if let Some(hwnd) = window.and_then(|t| live_token_window(t, host_id)) {
+        raise_window(hwnd);
+        return;
+    }
     if let Some(path) = open_path {
         if window_per_folder(host_id) && launch_with_folder(host_id, path) {
             return;
@@ -206,8 +259,12 @@ fn focus_window_of(host_id: &str) {
             (w.hwnd, exe)
         })
         .collect();
-    let Some(target) = select_host_window(&windows, host_id).map(to_hwnd) else { return };
+    if let Some(target) = select_host_window(&windows, host_id).map(to_hwnd) {
+        raise_window(target);
+    }
+}
 
+fn raise_window(target: HWND) {
     unsafe {
         if IsIconic(target).as_bool() {
             let _ = ShowWindow(target, SW_RESTORE);
@@ -304,6 +361,15 @@ mod tests {
         let wins: HashSet<u32> = [4].into_iter().collect();
         assert_eq!(pick_host(&[99, 4], &wins, exe_table), HostPick::Found(CODE.into()));
         assert_eq!(pick_host(&[], &wins, exe_table), HostPick::NotFound);
+    }
+
+    #[test]
+    fn parse_window_token_accepts_only_nonzero_integers() {
+        assert_eq!(parse_window_token("65872"), Some(65872));
+        assert_eq!(parse_window_token(" 65872\n"), Some(65872));
+        for bad in ["", "0", "abc", "12x", "-", "0x10", "1.5"] {
+            assert_eq!(parse_window_token(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

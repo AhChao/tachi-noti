@@ -41,6 +41,12 @@ pub struct SessionState {
     /// the bar drop sessions killed without a SessionEnd (e.g. IDE quit).
     #[serde(default)]
     pub pid: Option<u32>,
+    /// Opaque token for the exact host window the session lives in, captured
+    /// when the user submits a prompt (that window is frontmost then). Lets a
+    /// click focus the right window of a multi-window host and lets focus
+    /// suppression work per window. None where the platform has no tokens.
+    #[serde(default)]
+    pub window: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -89,6 +95,8 @@ pub struct Ctx {
     pub bundle_id: Option<String>,
     pub cwd: String,
     pub pid: Option<u32>,
+    /// Freshly captured or previously saved window token (see SessionState).
+    pub window: Option<String>,
 }
 
 pub enum Event<'a> {
@@ -131,6 +139,7 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
         last_event_at: now,
         waiting: None,
         pid: ctx.pid,
+        window: ctx.window.clone(),
     };
     // Refresh identity fields on every event (branch may change mid-session).
     let carry = |mut s: SessionState| {
@@ -142,6 +151,9 @@ pub fn apply_event(prev: Option<SessionState>, ctx: &Ctx, ev: Event, now: u64, f
         }
         if ctx.pid.is_some() {
             s.pid = ctx.pid;
+        }
+        if ctx.window.is_some() {
+            s.window = ctx.window.clone();
         }
         s.cwd = ctx.cwd.clone();
         s.last_event_at = now;
@@ -279,6 +291,18 @@ pub fn load_all() -> Vec<SessionState> {
         .collect()
 }
 
+/// The window token the session last recorded (see SessionState::window).
+pub fn saved_window(session_id: &str) -> Option<String> {
+    load(session_id).and_then(|s| s.window)
+}
+
+/// Window token for this event's context: captured now when the user just
+/// interacted with the session's window (`interactive`), else the saved one.
+pub fn window_for(session_id: &str, host_id: Option<&str>, interactive: bool) -> Option<String> {
+    let fresh = if interactive { crate::platform::host::current_window_token(host_id) } else { None };
+    fresh.or_else(|| saved_window(session_id))
+}
+
 pub fn live_count() -> usize {
     load_all().len()
 }
@@ -346,7 +370,36 @@ mod tests {
             bundle_id: Some("com.example.ide".into()),
             cwd: "/tmp/myrepo".into(),
             pid: Some(4242),
+            window: None,
         }
+    }
+
+    #[test]
+    fn window_token_is_captured_kept_and_replaced() {
+        let mut c = ctx("w");
+        c.window = Some("111".into());
+        let s = apply_event(None, &c, Event::PromptSubmit, 10, None).save.expect("prompt saves");
+        assert_eq!(s.window.as_deref(), Some("111"));
+
+        // Later events without a fresh capture keep the recorded window.
+        let s = apply_event(Some(s), &ctx("w"), Event::Stop { background_running: false }, 20, None)
+            .save
+            .expect("stop saves");
+        assert_eq!(s.window.as_deref(), Some("111"));
+
+        // The next prompt from another window of the same host moves it.
+        let mut c = ctx("w");
+        c.window = Some("222".into());
+        let s = apply_event(Some(s), &c, Event::PromptSubmit, 30, None).save.expect("prompt saves");
+        assert_eq!(s.window.as_deref(), Some("222"));
+    }
+
+    #[test]
+    fn state_files_without_window_still_parse() {
+        let json = r#"{"version":1,"session_id":"old","repo_name":"r","repo_root":null,"branch":null,
+            "bundle_id":null,"cwd":"/tmp","status":"idle","status_since":1,"task_started_at":null,"last_event_at":1}"#;
+        let s: SessionState = serde_json::from_str(json).expect("legacy file parses");
+        assert_eq!(s.window, None);
     }
 
     #[test]

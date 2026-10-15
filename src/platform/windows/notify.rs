@@ -159,6 +159,7 @@ fn build_toast_xml(n: &Notice, sound: &SoundPlan) -> String {
         let uri = crate::platform::activation_uri(&crate::platform::Activation {
             host_id: host_id.clone(),
             open_path: n.click_path.clone().filter(|_| per_folder),
+            window: n.window.clone(),
         });
         launch_attrs = format!(" activationType=\"protocol\" launch=\"{}\"", xml_escape(&uri));
     }
@@ -203,6 +204,7 @@ mod tests {
             group: "sess".into(),
             activate: None,
             click_path: None,
+            window: None,
             icon: None,
         }
     }

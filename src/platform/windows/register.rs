@@ -335,7 +335,7 @@ pub fn status() -> Vec<String> {
 /// we cannot parse is logged and dropped.
 pub fn handle_activation(uri: &str) {
     match crate::platform::parse_activation_uri(uri) {
-        Some(a) => super::host::focus_host(&a.host_id, a.open_path.as_deref()),
+        Some(a) => super::host::focus_host(&a.host_id, a.open_path.as_deref(), a.window.as_deref()),
         None => crate::hook::debug_log(&format!("activate: rejected uri {uri:?}")),
     }
 }

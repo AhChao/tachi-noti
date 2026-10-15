@@ -42,6 +42,23 @@ pub fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
+/// Parents of `pid`, nearest first, excluding `pid` itself. libproc lookups
+/// are cheap syscalls, so walking hop by hop is fine here.
+pub fn ancestors(pid: u32, max: usize) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut cur = pid;
+    while out.len() < max {
+        match parent_pid(cur) {
+            Some(p) if p != cur && p > 0 && !out.contains(&p) => {
+                out.push(p);
+                cur = p;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +73,9 @@ mod tests {
         assert!(exe_path(4_000_000).is_none());
         assert!(pid_alive(std::process::id()));
         assert!(!pid_alive(4_000_000));
+        let chain = ancestors(std::process::id(), 15);
+        assert_eq!(chain.first().copied(), parent_pid(std::process::id()));
+        assert!(!chain.contains(&std::process::id()));
+        assert!(ancestors(4_000_000, 15).is_empty());
     }
 }

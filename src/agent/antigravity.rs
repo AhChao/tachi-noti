@@ -47,7 +47,8 @@ struct ToolCall {
 /// hang `agy`), then applies the matching transition.
 pub fn ingest(event: Option<&str>) -> Result<()> {
     let payload: Payload = serde_json::from_str(&read_stdin_brief()).unwrap_or_default();
-    let ctx = build_ctx(&payload);
+    // "start" fires as the user submits a prompt: their window is frontmost.
+    let ctx = build_ctx(&payload, event == Some("start"));
     match event {
         Some("start") => {
             hook::transition(&ctx, state::Event::PromptSubmit);
@@ -59,7 +60,7 @@ pub fn ingest(event: Option<&str>) -> Result<()> {
         Some("stop") => {
             hook::transition(&ctx, state::Event::Stop { background_running: false });
             let cfg = config::load();
-            if cfg.focus_suppression && focus::session_is_frontmost() {
+            if cfg.focus_suppression && focus::session_is_frontmost(ctx.window.as_deref()) {
                 return Ok(());
             }
             let notice = hook::build_notice(&cfg, &ctx, "Turn complete".to_string(), &cfg.sounds.stop);
@@ -85,7 +86,7 @@ fn read_stdin_brief() -> String {
     rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or_default()
 }
 
-fn build_ctx(p: &Payload) -> state::Ctx {
+fn build_ctx(p: &Payload, interactive: bool) -> state::Ctx {
     let agent = AgentId::Antigravity;
     let pid = focus::agent_ancestor_pid(agent);
     let cwd = p
@@ -103,15 +104,18 @@ fn build_ctx(p: &Payload) -> state::Ctx {
         .clone()
         .or_else(|| pid.map(|p| format!("antigravity-{p}")))
         .unwrap_or_else(|| "antigravity-unknown".into());
+    let bundle_id = focus::session_bundle_id();
+    let window = state::window_for(&session_id, bundle_id.as_deref(), interactive);
     state::Ctx {
         session_id,
         agent,
         repo_name: repo.name,
         repo_root: repo.toplevel.map(|p| p.to_string_lossy().into_owned()),
         branch: repo.branch,
-        bundle_id: focus::session_bundle_id(),
+        bundle_id,
         cwd: cwd.to_string_lossy().into_owned(),
         pid,
+        window,
     }
 }
 

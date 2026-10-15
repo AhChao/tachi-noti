@@ -39,7 +39,7 @@ pub fn run() -> Result<()> {
     let input: HookInput = serde_json::from_str(&raw).unwrap_or_default();
     let Some(event) = input.hook_event_name.as_deref() else { return Ok(()) };
     let cfg = config::load();
-    let ctx = build_ctx(&input);
+    let ctx = build_ctx(&input, matches!(event, "UserPromptSubmit" | "SessionStart"));
 
     match event {
         "SessionStart" => {
@@ -67,7 +67,10 @@ pub fn run() -> Result<()> {
     }
 }
 
-fn build_ctx(input: &HookInput) -> state::Ctx {
+/// `interactive` = the user just acted in the session's window (prompt
+/// submitted / session started), so the frontmost window is captured as the
+/// session's window token.
+fn build_ctx(input: &HookInput, interactive: bool) -> state::Ctx {
     let cwd = input
         .cwd
         .as_ref()
@@ -78,15 +81,19 @@ fn build_ctx(input: &HookInput) -> state::Ctx {
     // This entry point is the Claude rich-hook adapter: the agent identity is
     // known from the fact that a Claude hook invoked us.
     let agent = crate::agent::AgentId::Claude;
+    let session_id = input.session_id.clone().unwrap_or_else(|| "unknown".into());
+    let bundle_id = focus::session_bundle_id();
+    let window = state::window_for(&session_id, bundle_id.as_deref(), interactive);
     state::Ctx {
-        session_id: input.session_id.clone().unwrap_or_else(|| "unknown".into()),
+        session_id,
         agent,
         repo_name: repo.name,
         repo_root: repo.toplevel.map(|p| p.to_string_lossy().into_owned()),
         branch: repo.branch,
-        bundle_id: focus::session_bundle_id(),
+        bundle_id,
         cwd: cwd.to_string_lossy().into_owned(),
         pid: focus::agent_ancestor_pid(agent),
+        window,
     }
 }
 
@@ -145,7 +152,7 @@ fn on_stop(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) -> Result<
             }
         }
     }
-    if cfg.focus_suppression && focus::session_is_frontmost() {
+    if cfg.focus_suppression && focus::session_is_frontmost(ctx.window.as_deref()) {
         return Ok(());
     }
 
@@ -190,7 +197,7 @@ fn on_notification(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
         return Ok(());
     }
 
-    if cfg.focus_suppression && focus::session_is_frontmost() {
+    if cfg.focus_suppression && focus::session_is_frontmost(ctx.window.as_deref()) {
         return Ok(());
     }
     let body = input
@@ -219,7 +226,7 @@ fn on_permission_request(input: &HookInput, cfg: &config::Config, ctx: &state::C
         return Ok(()); // the fallback Notification already announced this dialog
     }
 
-    if cfg.focus_suppression && focus::session_is_frontmost() {
+    if cfg.focus_suppression && focus::session_is_frontmost(ctx.window.as_deref()) {
         return Ok(());
     }
     let body = match kind {
@@ -270,7 +277,7 @@ fn on_pre_tool_use(input: &HookInput, cfg: &config::Config, ctx: &state::Ctx) ->
         return Ok(());
     }
 
-    if cfg.focus_suppression && focus::session_is_frontmost() {
+    if cfg.focus_suppression && focus::session_is_frontmost(ctx.window.as_deref()) {
         return Ok(());
     }
     let body = question.unwrap_or_else(|| format!("{} has a question for you", ctx.agent.display_name()));
@@ -305,6 +312,7 @@ pub(crate) fn build_notice(cfg: &config::Config, ctx: &state::Ctx, body: String,
         sound: if sound.is_empty() { None } else { Some(sound.to_string()) },
         group: ctx.session_id.clone(),
         activate: ctx.bundle_id.clone(),
+        window: ctx.window.clone(),
         click_path: Some(ctx.repo_root.clone().unwrap_or_else(|| ctx.cwd.clone())),
         icon: notify::resolve_icon(cfg),
     }
@@ -314,7 +322,7 @@ pub fn run_test() -> Result<()> {
     let cfg = config::load();
     let backend = notify::detect(&cfg);
     let input = HookInput { session_id: Some("tachi-noti-test".into()), ..Default::default() };
-    let ctx = build_ctx(&input);
+    let ctx = build_ctx(&input, false);
     let notice = build_notice(&cfg, &ctx, "Tachi Noti is working — woof.".into(), &cfg.sounds.stop);
 
     println!("backend:  {}", backend.name());
@@ -328,7 +336,7 @@ pub fn run_test() -> Result<()> {
             None => println!("click-to-focus: {bid}"),
         }
     }
-    if cfg.focus_suppression && focus::session_is_frontmost() {
+    if cfg.focus_suppression && focus::session_is_frontmost(ctx.window.as_deref()) {
         println!("note: focus suppression would normally skip this (host app is frontmost); sending anyway for the test.");
     }
     notify::send(&backend, &notice)?;

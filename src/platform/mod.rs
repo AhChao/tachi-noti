@@ -16,6 +16,8 @@
 //! - `proc::self_parent_pid() -> u32`
 //! - `proc::exe_path(pid: u32) -> Option<PathBuf>` (resolved image path)
 //! - `proc::pid_alive(pid: u32) -> bool` (exists and is ours)
+//! - `proc::ancestors(pid: u32, max: usize) -> Vec<u32>` — parents nearest
+//!   first, excluding `pid`; one consistent view of the process table
 //!
 //! **Host app** (`host`) — the app hosting a session (terminal / IDE). The id
 //! is opaque to callers and persisted in state files as `bundle_id`: a bundle
@@ -27,8 +29,16 @@
 //!   where opening the project folder focuses the exact window
 //! - `host::window_per_folder_hook_hint() -> bool` — extra hook-process-only
 //!   evidence (macOS: TERM_PROGRAM=vscode catches unlisted forks)
-//! - `host::focus_host(host_id: &str, open_path: Option<&str>)` — bring the
-//!   session's window forward (menu click, notification click)
+//! - `host::focus_host(host_id: &str, open_path: Option<&str>, window: Option<&str>)`
+//!   — bring the session's window forward (menu click, notification click);
+//!   a still-valid window token wins over app/folder-level focus
+//! - `host::current_window_token(host_id: Option<&str>) -> Option<String>` —
+//!   the frontmost window as an opaque token, only when it belongs to
+//!   `host_id`; called when the user just acted in the session (prompt
+//!   submit), so that window is the session's. None = platform has no tokens
+//! - `host::window_frontmost(token: &str) -> Option<bool>` — is that window
+//!   frontmost; None when the token is unusable (window gone, no tokens), and
+//!   the caller falls back to app-level comparison
 //!
 //! **Notifications** (`notify`):
 //! - `notify::Backend` with `name(&self) -> &'static str`,
@@ -92,6 +102,7 @@ pub const ACTIVATION_SCHEME: &str = "tachi-noti";
 pub struct Activation {
     pub host_id: String,
     pub open_path: Option<String>,
+    pub window: Option<String>,
 }
 
 /// `tachi-noti://focus?host=<pct>&path=<pct>` — every byte outside the
@@ -102,6 +113,10 @@ pub fn activation_uri(a: &Activation) -> String {
     if let Some(p) = &a.open_path {
         uri.push_str("&path=");
         uri.push_str(&pct_encode(p));
+    }
+    if let Some(w) = &a.window {
+        uri.push_str("&win=");
+        uri.push_str(&pct_encode(w));
     }
     uri
 }
@@ -114,16 +129,22 @@ pub fn parse_activation_uri(uri: &str) -> Option<Activation> {
     let query = rest.strip_prefix("/?").or_else(|| rest.strip_prefix('?'))?;
     let mut host_id = None;
     let mut open_path = None;
+    let mut window = None;
     for pair in query.split('&') {
         let (k, v) = pair.split_once('=')?;
         match k {
             "host" => host_id = Some(pct_decode(v)?),
             "path" => open_path = Some(pct_decode(v)?),
+            "win" => window = Some(pct_decode(v)?),
             _ => {}
         }
     }
     let host_id = host_id.filter(|h| !h.is_empty())?;
-    Some(Activation { host_id, open_path: open_path.filter(|p| !p.is_empty()) })
+    Some(Activation {
+        host_id,
+        open_path: open_path.filter(|p| !p.is_empty()),
+        window: window.filter(|w| !w.is_empty()),
+    })
 }
 
 fn pct_encode(s: &str) -> String {
@@ -164,6 +185,7 @@ mod tests {
         let a = Activation {
             host_id: r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code\Code.exe".into(),
             open_path: Some(r#"C:\work\a b&c=d"%1 '$(x)'\repo 中文"#.into()),
+            window: Some("131546".into()),
         };
         let uri = activation_uri(&a);
         assert!(uri.starts_with("tachi-noti://focus?host="));
@@ -176,7 +198,7 @@ mod tests {
 
     #[test]
     fn activation_uri_without_path() {
-        let a = Activation { host_id: "com.apple.Terminal".into(), open_path: None };
+        let a = Activation { host_id: "com.apple.Terminal".into(), open_path: None, window: None };
         assert_eq!(parse_activation_uri(&activation_uri(&a)), Some(a));
     }
 

@@ -30,7 +30,7 @@ pub struct SessionItem {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    Focus { host_id: String, open_path: Option<String> },
+    Focus { host_id: String, open_path: Option<String>, window: Option<String> },
     SetStopSound(String),
     SetAttentionSound(String),
     ToggleLaunchAtLogin,
@@ -84,7 +84,11 @@ pub fn build_with(
         for row in group.rows {
             let action = match (&row.bundle_id, row.enabled) {
                 (Some(host_id), true) => {
-                    Some(Action::Focus { host_id: host_id.clone(), open_path: row.open_path.clone() })
+                    Some(Action::Focus {
+                        host_id: host_id.clone(),
+                        open_path: row.open_path.clone(),
+                        window: row.window.clone(),
+                    })
                 }
                 _ => None,
             };
@@ -171,8 +175,8 @@ pub fn title_with(
 /// Run the OS-neutral part of an action; the front end handles the rest.
 pub fn dispatch_shared(action: &Action) -> Dispatched {
     match action {
-        Action::Focus { host_id, open_path } => {
-            platform::host::focus_host(host_id, open_path.as_deref());
+        Action::Focus { host_id, open_path, window } => {
+            platform::host::focus_host(host_id, open_path.as_deref(), window.as_deref());
             Dispatched::Done
         }
         Action::SetStopSound(v) => {
@@ -224,6 +228,7 @@ mod tests {
             last_event_at,
             waiting: None,
             pid: None,
+            window: None,
         }
     }
 
@@ -301,7 +306,7 @@ mod tests {
         let Item::Session(on) = &m.items[2] else { panic!() };
         assert_eq!(
             on.action,
-            Some(Action::Focus { host_id: "com.apple.Terminal".into(), open_path: None })
+            Some(Action::Focus { host_id: "com.apple.Terminal".into(), open_path: None, window: None })
         );
     }
 
@@ -314,7 +319,7 @@ mod tests {
         let Item::Session(s) = &m.items[1] else { panic!() };
         assert_eq!(
             s.action,
-            Some(Action::Focus { host_id: "com.microsoft.VSCode".into(), open_path: Some("/r/alpha".into()) })
+            Some(Action::Focus { host_id: "com.microsoft.VSCode".into(), open_path: Some("/r/alpha".into()), window: None })
         );
     }
 
