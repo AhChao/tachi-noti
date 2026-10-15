@@ -2,7 +2,7 @@
 
 <img src="assets/tachi.png" width="160" align="right" alt="Tachi, a Border Collie in a butler's tailcoat">
 
-Native macOS notifications for [Claude Code](https://code.claude.com) hooks, delivered by **Tachi** — a Border Collie butler who watches your sessions so you don't have to. A single fast Rust binary, zero runtime dependencies.
+Native macOS and Windows notifications for [Claude Code](https://code.claude.com) hooks, delivered by **Tachi** — a Border Collie butler who watches your sessions so you don't have to. A single fast Rust binary, zero runtime dependencies.
 
 ## Meet Tachi
 
@@ -33,7 +33,7 @@ His portrait rides along inside the binary, so every notification arrives with h
 
 To see the same numbers inside Claude Code as well, chain `contrib/statusline/context-usage.sh` after the capture stage: `tachi-noti statusline --chain /path/to/contrib/statusline/context-usage.sh`. It prints one line, `ctx 34% (346k/1M) · 5h 72% 1h29m · 7d 41%`, coloured green under 30%, yellow to 60% and red above. It reads only the statusLine payload (one `jq` call, about 14ms) and needs `jq` on the PATH.
 
-No daemon, no IPC: the hooks write tiny per-session state files under `~/Library/Application Support/tachi-noti/state/`, and the bar re-reads them every 2 seconds.
+No daemon, no IPC: the hooks write tiny per-session state files under `~/Library/Application Support/tachi-noti/state/` (`%APPDATA%\tachi-noti\state\` on Windows), and the bar re-reads them every 2 seconds.
 
 ```sh
 cargo install --path . --features bar   # installs tachi-noti + tachi-bar
@@ -59,6 +59,36 @@ tachi-noti auto-detects the best available backend:
 
 1. **terminal-notifier** (`brew install terminal-notifier`) — grouping (one notification per session, replaced in place), click-to-focus, and Tachi's portrait on the notification.
 2. **osascript** — built into macOS, always works. Notifications are attributed to "Script Editor"; on first use macOS asks for notification permission (System Settings → Notifications → Script Editor). No custom image on this backend.
+
+## Windows
+
+Windows 10/11 is supported natively: the same hooks, the same state files, WinRT toasts instead of macOS notifications, and a system-tray icon instead of the menu bar item. Toasts stay in the Notification Center (Win+N), so anything you missed is still there; the tray menu's "Recent notifications" shows the last five as well.
+
+Requirements: a Rust toolchain with the MSVC target (`rustup default stable-x86_64-pc-windows-msvc`, plus the Visual Studio Build Tools' "Desktop development with C++" workload for the linker) and Claude Code's own Git for Windows. Claude Code runs hook and statusLine commands through Git Bash, so the installed command paths use forward slashes (`C:/Users/you/.cargo/bin/tachi-noti.exe hook`).
+
+```powershell
+cargo install --path . --features bar   # tachi-noti.exe + tachi-bar.exe into %USERPROFILE%\.cargo\bin
+tachi-noti install                      # hooks + statusLine, and registers the "Tachi" app identity
+tachi-bar install-agent                 # start the tray at login (HKCU Run) and point the Start menu entry at tachi-bar
+tachi-bar                               # run the tray now (or launch "Tachi" from the Start menu)
+tachi-noti test                         # fire a sample toast
+```
+
+What `install` registers, all per user under HKCU (no admin, nothing outside your profile):
+
+- `HKCU\Software\Classes\AppUserModelId\TachiNoti.Tachi` — the toast identity (display name "Tachi" and Tachi's portrait), so notifications are attributed to Tachi, not to PowerShell.
+- `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Tachi.lnk` — the Start menu entry carrying the same AppUserModelID; Windows requires it before an unpackaged desktop app may raise toasts.
+- `HKCU\Software\Classes\tachi-noti` — the `tachi-noti://` URL protocol a toast click launches (`tachi-bar.exe activate <uri>`, or `tachi-noti.exe` when the tray isn't built).
+
+`tachi-noti unregister` removes exactly those three; `tachi-noti doctor` shows their state. If you build tachi-bar after running `tachi-noti install`, run `tachi-bar install-app` (or `install-agent`) once so the Start menu entry and the click target move to tachi-bar.exe, which has no console window.
+
+Differences from macOS, by design of the platform:
+
+- **Host app** is the executable that owns the session's window (`Code.exe`, `WindowsTerminal.exe`, …), found by walking the process tree; there is no bundle id.
+- **Exact window**: when you submit a prompt, the window you typed into is recorded with the session. Clicking a toast or a tray row raises that window, even with several windows of the same terminal or IDE open, and focus suppression only skips a notification when that very window is in front. A stale handle falls back to the macOS behaviour (VS Code-family apps get the project folder, other apps their most recent window).
+- **Sounds** are `.wav` names from `%WINDIR%\Media` (defaults: `Windows Notify System Generic` for completion, `Windows Exclamation` for attention) or `TachiBark`. Toasts are shown silent and tachi-noti plays the file itself, because Windows does not let an unpackaged app give a toast a custom sound; an unknown name plays Windows' default notification sound.
+- **Tray**: Tachi's face with a dot for the most urgent session (yellow waiting, green running, gray idle) and a red dot for the usage alert; hover for the counts. Windows menus cannot update while open or show per-row tooltips, so row labels refresh when the menu is reopened and permission rows carry their command hint inline.
+- **Bringing a window forward**: Windows only lets the app the user last interacted with take the foreground. A toast or tray click qualifies; if Windows still refuses, the target window flashes in the taskbar instead.
 
 ## Configuration
 
@@ -86,11 +116,12 @@ attention = "Basso"        # permission / question / plan-approval sound.
 | `tachi-noti hook` | Reads a hook event JSON from stdin and notifies. Used by the hooks; always exits 0 so it can never block Claude Code. |
 | `tachi-noti install [--scope user\|project]` | Safely merges hook entries into settings.json: timestamped backup, append-only (existing hooks untouched), idempotent, atomic write. Aborts rather than touch a file it can't parse. |
 | `tachi-noti uninstall [--scope ...]` | Removes only tachi-noti's hook entries. |
+| `tachi-noti register` / `unregister` | Windows: create / remove the per-user toast identity, Start menu entry and URL protocol (`install` registers automatically). No-op on macOS. |
 | `tachi-noti log [-n N]` | Shows the last N notifications (default 20) with relative timestamps. |
 | `tachi-noti test` | Sends a sample notification and prints the active backend. |
 | `tachi-noti doctor` | Prints backend, bundle-id detection, config, install status per scope, live sessions, history stats. |
 | `tachi-bar` | Runs the menu bar session monitor (`--features bar` build). |
-| `tachi-bar install-agent` / `uninstall-agent` | Adds/removes a launchd agent so the bar starts at login. |
+| `tachi-bar install-agent` / `uninstall-agent` | Adds/removes a launchd agent (macOS) or HKCU Run entry (Windows) so the bar starts at login. |
 
 ## How it works
 
@@ -107,6 +138,8 @@ The installed hooks are:
 Upgrading from v0.1: run `tachi-noti install` again — it appends only the missing hook events (`doctor` will remind you).
 
 Implementation notes:
+
+- Everything OS-specific lives behind `src/platform/` (`macos/`, `windows/`), whose `mod.rs` documents the contract both implement: process introspection, host-app detection and focus, notification delivery, sounds, shell invocation and app registration. Nothing outside it uses `cfg(target_os)`. The tray/menu bar content is built once in `bar::menu` and rendered natively by `macos_ui` (AppKit) and `windows_tray` (tray-icon). CI builds and tests both OSes.
 
 - The session's host app is identified by the `__CFBundleIdentifier` env var (falls back to a `TERM_PROGRAM` map), used both for click-to-focus and for frontmost comparison via `lsappinfo`.
 - Notification text is passed strictly via argv (AppleScript `on run argv` / discrete `Command` args) — message content can never be injected into a shell or script.
