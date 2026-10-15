@@ -6,6 +6,7 @@ pub mod gitinfo;
 pub mod history;
 pub mod hook;
 pub mod notify;
+pub mod platform;
 pub mod settings;
 pub mod state;
 pub mod transcript;

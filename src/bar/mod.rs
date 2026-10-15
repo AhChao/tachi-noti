@@ -1,7 +1,8 @@
 //! Pure model layer for the tachi-bar menu: turns session state files into a
-//! renderable snapshot. No AppKit here so it stays unit-testable.
+//! renderable snapshot. No AppKit / Win32 here so it stays unit-testable and
+//! shared by both front ends.
 
-use crate::notify;
+use crate::platform;
 use crate::state::{SessionState, Status, WaitKind, format_duration};
 use std::time::Duration;
 
@@ -54,10 +55,6 @@ fn status_rank(status: Status) -> u8 {
         Status::Running => 1,
         Status::Idle => 2,
     }
-}
-
-fn basename(p: &str) -> &str {
-    p.trim_end_matches('/').rsplit('/').next().unwrap_or(p)
 }
 
 pub fn build_snapshot(states: Vec<SessionState>, now: u64) -> Snapshot {
@@ -114,7 +111,7 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
     let id6: String = s.session_id.chars().take(6).collect();
     let mut label = format!("{} {elapsed} \u{00B7} {id6}", status_word(s));
     if s.cwd != *group_key {
-        label.push_str(&format!(" \u{00B7} {}", basename(&s.cwd)));
+        label.push_str(&format!(" \u{00B7} {}", platform::path_basename(&s.cwd)));
     }
     let waiting_detail = s.waiting.as_ref().and_then(|w| w.detail.clone());
     // A permission wait names the exact command — surface a hint inline.
@@ -127,7 +124,7 @@ pub fn build_row(s: &SessionState, group_key: &str, now: u64) -> Row {
     let open_path = s
         .bundle_id
         .as_deref()
-        .filter(|b| notify::vscode_family_bundle(b))
+        .filter(|b| platform::host::window_per_folder(b))
         .map(|_| group_key.to_string());
     Row {
         status: s.status,
@@ -202,76 +199,6 @@ pub fn usage_alert(u: &crate::usage::Usage, threshold_pct: u8) -> bool {
         .any(|w| w.used_percentage >= threshold_pct as f64)
 }
 
-/// Extensions macOS resolves for named notification sounds in Library/Sounds.
-const SOUND_EXTS: &[&str] = &["aiff", "aif", "wav", "caf", "m4a", "mp3"];
-
-/// Sound names (basename without extension) found in a Library/Sounds dir.
-fn sound_names_in(dir: &std::path::Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|e| {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    let (stem, ext) = name.rsplit_once('.')?;
-                    SOUND_EXTS.contains(&ext.to_ascii_lowercase().as_str()).then(|| stem.to_string())
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Choices for the sound pickers: Tachi's bark, the user's own sounds
-/// (~/Library/Sounds), the system sounds, and silence.
-/// Returns (label, config value) pairs.
-pub fn sound_options() -> Vec<(String, String)> {
-    let mut opts = vec![("Tachi Bark".to_string(), "TachiBark".to_string())];
-    let mut user: Vec<String> = dirs::home_dir()
-        .map(|h| sound_names_in(&h.join("Library/Sounds")))
-        .unwrap_or_default();
-    user.retain(|n| n != notify::BARK_SOUND_NAME);
-    user.sort();
-    user.dedup();
-    let mut system = sound_names_in(std::path::Path::new("/System/Library/Sounds"));
-    system.sort();
-    opts.extend(user.into_iter().map(|n| (n.clone(), n)));
-    opts.extend(system.into_iter().map(|n| (n.clone(), n)));
-    opts.push(("Silent".to_string(), String::new()));
-    opts
-}
-
-/// Resolve a sound value to a playable file (in-menu preview, doctor check).
-/// Mirrors macOS's by-name lookup: ~/Library/Sounds first, then the system's.
-pub fn sound_preview_path(value: &str) -> Option<std::path::PathBuf> {
-    if value.is_empty() {
-        return None;
-    }
-    let dirs_to_try = [
-        dirs::home_dir().map(|h| h.join("Library/Sounds")),
-        Some(std::path::PathBuf::from("/System/Library/Sounds")),
-    ];
-    for dir in dirs_to_try.into_iter().flatten() {
-        for ext in SOUND_EXTS {
-            let p = dir.join(format!("{value}.{ext}"));
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
-/// Focus the window hosting a session. VS Code-family apps get the folder path
-/// (window-precise); other apps a plain activation. argv-only, no shell.
-pub fn focus(bundle_id: &str, open_path: Option<&str>) {
-    let mut cmd = std::process::Command::new("/usr/bin/open");
-    cmd.arg("-b").arg(bundle_id);
-    if let Some(p) = open_path {
-        cmd.arg(p);
-    }
-    let _ = cmd.spawn();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,7 +208,7 @@ mod tests {
             version: 1,
             session_id: id.into(),
             agent: crate::agent::AgentId::Claude,
-            repo_name: basename(root).into(),
+            repo_name: platform::path_basename(root).into(),
             repo_root: Some(root.into()),
             branch: Some("main".into()),
             bundle_id: Some("com.microsoft.VSCode".into()),
@@ -434,19 +361,6 @@ mod tests {
         assert_eq!(snap.running, 2);
         assert_eq!(snap.waiting, 1);
         assert_eq!(title_segments(&snap), vec![(1, Status::Waiting), (2, Status::Running)]);
-    }
-
-    #[test]
-    fn sound_names_cover_macos_formats() {
-        let dir = std::env::temp_dir().join(format!("tachi-noti-test-sounds-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for f in ["Glass.aiff", "custom.wav", "Voice.m4a", "notes.txt", "noext"] {
-            std::fs::write(dir.join(f), b"x").unwrap();
-        }
-        let mut names = sound_names_in(&dir);
-        names.sort();
-        assert_eq!(names, vec!["Glass", "Voice", "custom"], "audio files only, extension stripped");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

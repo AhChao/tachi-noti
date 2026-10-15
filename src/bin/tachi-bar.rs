@@ -65,7 +65,6 @@ const FROM_APP_ENV: &str = "TACHI_BAR_LAUNCHED_FROM_APP";
 /// Exclusive advisory lock; the returned file must stay alive for the
 /// process lifetime.
 fn acquire_single_instance_lock() -> Option<std::fs::File> {
-    use std::os::fd::AsRawFd;
     let dir = tachi_noti::state::data_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let f = std::fs::OpenOptions::new()
@@ -76,8 +75,7 @@ fn acquire_single_instance_lock() -> Option<std::fs::File> {
         .ok()?;
     let attempts = if std::env::var_os(WAIT_LOCK_ENV).is_some() { 50 } else { 1 };
     for i in 0..attempts {
-        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 {
+        if f.try_lock().is_ok() {
             return Some(f);
         }
         if i + 1 < attempts {
@@ -398,6 +396,7 @@ mod ui {
     };
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+    use tachi_noti::platform::sound;
     use tachi_noti::{bar, config, history, notify, state, usage};
 
     /// Click target for a menu row, kept session-identified so live label
@@ -439,7 +438,7 @@ mod ui {
                 let idx = sender.tag() as usize;
                 if let Some(a) = self.ivars().actions.borrow().get(idx).cloned() {
                     if let Some(bid) = &a.bundle_id {
-                        bar::focus(bid, a.open_path.as_deref());
+                        tachi_noti::platform::host::focus_host(bid, a.open_path.as_deref());
                     }
                 }
             }
@@ -703,11 +702,11 @@ mod ui {
                 return;
             }
             if value == notify::BARK_SOUND_NAME {
-                notify::ensure_bark_sound();
+                sound::ensure_bark();
             }
             // Audible feedback so the pick can be judged on the spot.
-            if let Some(path) = bar::sound_preview_path(&value) {
-                let _ = std::process::Command::new("/usr/bin/afplay").arg(path).spawn();
+            if let Some(path) = sound::preview_path(&value) {
+                sound::play_file(&path);
             }
         }
 
@@ -716,7 +715,7 @@ mod ui {
         /// distinct on purpose, so they're tellable apart by ear.
         fn add_sound_submenu(&self, menu: &NSMenu) {
             let sounds = config::load().sounds;
-            let options = bar::sound_options();
+            let options = sound::options();
             self.add_sound_picker(menu, "Completion Sound", &sounds.stop, sel!(selectStopSound:), &options);
             self.add_sound_picker(menu, "Attention Sound", &sounds.attention, sel!(selectAttentionSound:), &options);
             *self.ivars().sound_values.borrow_mut() = options.into_iter().map(|(_, v)| v).collect();

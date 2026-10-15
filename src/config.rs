@@ -7,10 +7,10 @@ pub struct Config {
     pub sounds: Sounds,
     pub focus_suppression: bool,
     pub min_duration_secs: u64,
-    /// None = auto-detect; "terminal-notifier" | "osascript" to force.
+    /// None = auto-detect; a backend name (`tachi-noti doctor` lists them) to force.
     pub backend: Option<String>,
     pub max_body_len: usize,
-    /// Image shown on the notification (terminal-notifier only).
+    /// Image shown on the notification (terminal-notifier / Windows toast).
     /// None = bundled Tachi portrait; "" = no image; otherwise a file path.
     pub icon: Option<String>,
     /// Menu bar shows a red warning when any usage window reaches this
@@ -42,7 +42,10 @@ impl Default for Config {
 
 impl Default for Sounds {
     fn default() -> Self {
-        Sounds { stop: "Glass".into(), attention: "Basso".into() }
+        Sounds {
+            stop: crate::platform::sound::DEFAULT_STOP.into(),
+            attention: crate::platform::sound::DEFAULT_ATTENTION.into(),
+        }
     }
 }
 

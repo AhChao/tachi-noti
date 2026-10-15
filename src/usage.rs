@@ -190,7 +190,6 @@ fn save_from_statusline_at(path: &Path, payload: &Value, now: u64) {
 /// Exclusive advisory lock beside `path`, released on drop. Best-effort: if
 /// the lock file can't be opened we proceed unlocked rather than drop data.
 fn lock(path: &Path) -> Option<std::fs::File> {
-    use std::os::fd::AsRawFd;
     let name = path.file_name()?.to_string_lossy().into_owned();
     let f = std::fs::OpenOptions::new()
         .create(true)
@@ -198,8 +197,8 @@ fn lock(path: &Path) -> Option<std::fs::File> {
         .write(true)
         .open(path.with_file_name(format!(".{name}.lock")))
         .ok()?;
-    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
-    (rc == 0).then_some(f)
+    f.lock().ok()?;
+    Some(f)
 }
 
 fn window(v: &Value) -> Option<Window> {
@@ -225,9 +224,7 @@ pub fn run_statusline(chain: Option<&str>) -> i32 {
         save_from_statusline(&v);
     }
     let Some(cmd) = chain else { return 0 };
-    let child = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cmd)
+    let child = crate::platform::shell::command(cmd)
         .stdin(std::process::Stdio::piped())
         .spawn();
     let Ok(mut child) = child else { return 0 };

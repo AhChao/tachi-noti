@@ -33,7 +33,7 @@ fn exe_for_shell() -> String {
     std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map(|p| {
-            let path = p.display().to_string();
+            let path = crate::platform::shell::exe_for_command_line(&p);
             if path.contains(' ') || path.contains('\'') || path.contains('"') {
                 crate::notify::sh_quote(&path)
             } else {

@@ -283,10 +283,9 @@ pub fn live_count() -> usize {
     load_all().len()
 }
 
-/// True when the pid exists and is ours to signal. EPERM (exists, other
-/// user) counts as dead: our same-user Claude can't have become that.
+/// True when the pid exists and is ours (see `platform::proc::pid_alive`).
 pub fn pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    crate::platform::proc::pid_alive(pid)
 }
 
 /// Drop sessions whose recorded Claude process is gone (IDE quit, terminal

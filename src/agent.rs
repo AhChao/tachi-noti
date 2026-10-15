@@ -117,12 +117,22 @@ impl AgentId {
     /// Does this executable path look like this agent's host process?
     pub fn matches_host(self, path: &Path) -> bool {
         let hp = self.host_patterns();
+        let ci = crate::platform::shell::CASE_INSENSITIVE_PATHS;
+        let eq = |a: &str, b: &str| if ci { a.eq_ignore_ascii_case(b) } else { a == b };
         let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if hp.exec_names.contains(&base) {
+        // Windows images carry an .exe suffix; strip only that one, never a
+        // generic extension (Claude's native binary is named like "2.1.3").
+        let base = match base.len().checked_sub(4).filter(|&i| base.is_char_boundary(i)) {
+            Some(i) if base[i..].eq_ignore_ascii_case(".exe") => &base[..i],
+            _ => base,
+        };
+        if hp.exec_names.iter().any(|n| eq(n, base)) {
             return true;
         }
-        path.components()
-            .any(|c| hp.path_markers.iter().any(|m| c.as_os_str() == *m))
+        path.components().any(|c| {
+            let c = c.as_os_str().to_string_lossy();
+            hp.path_markers.iter().any(|m| eq(m, &c))
+        })
     }
 }
 
@@ -182,6 +192,16 @@ mod tests {
         // The Antigravity *IDE* (Electron app) is not a CLI host.
         assert!(!AgentId::Claude.matches_host(Path::new("/Applications/Antigravity IDE.app/Contents/MacOS/Electron")));
         assert!(!AgentId::Antigravity.matches_host(Path::new("/Applications/Antigravity IDE.app/Contents/MacOS/Electron")));
+    }
+
+    #[test]
+    fn windows_exe_suffix_is_stripped_but_versions_are_not() {
+        assert!(AgentId::Claude.matches_host(Path::new("/x/bin/claude.exe")));
+        assert!(AgentId::Claude.matches_host(Path::new("/x/bin/node.EXE")));
+        assert!(AgentId::Codex.matches_host(Path::new("/x/bin/codex.exe")));
+        // A versioned native binary outside a marker dir must not match on its stem.
+        assert!(!AgentId::Claude.matches_host(Path::new("/x/bin/2.1.175")));
+        assert!(!AgentId::Claude.matches_host(Path::new("/x/bin/zsh.exe")));
     }
 
     #[test]

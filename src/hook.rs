@@ -333,12 +333,8 @@ pub fn run_test() -> Result<()> {
     }
     notify::send(&backend, &notice)?;
     println!("notification sent.");
-    if matches!(backend, notify::Backend::OsaScript) {
-        println!(
-            "\nIf nothing appeared: macOS attributes osascript notifications to \"Script Editor\" —\n\
-             check System Settings → Notifications → Script Editor is allowed.\n\
-             Tip: `brew install terminal-notifier` upgrades to grouping + click-to-focus."
-        );
+    if let Some(hint) = backend.setup_hint() {
+        println!("\n{hint}");
     }
     Ok(())
 }
@@ -351,12 +347,14 @@ pub fn run_doctor() -> Result<()> {
     if let Ok(exe) = std::env::current_exe() {
         println!("binary:           {}", exe.display());
     }
-    println!("backend:          {}{}", backend.name(), match &backend {
-        notify::Backend::TerminalNotifier(p) => format!(" ({})", p.display()),
-        notify::Backend::OsaScript => " (install terminal-notifier for grouping + click-to-focus)".into(),
-    });
+    println!("backend:          {}{}", backend.name(), backend.detail());
+    for line in crate::platform::register::status() {
+        println!("registration:     {line}");
+    }
     println!("TERM_PROGRAM:     {}", std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "(unset)".into()));
-    println!("__CFBundleIdent:  {}", std::env::var("__CFBundleIdentifier").unwrap_or_else(|_| "(unset)".into()));
+    if let Ok(bid) = std::env::var("__CFBundleIdentifier") {
+        println!("__CFBundleIdent:  {bid}");
+    }
     println!("session bundle:   {}", focus::session_bundle_id().unwrap_or_else(|| "(unknown — no click-to-focus / suppression)".into()));
     println!("claude pid:       {}", focus::agent_ancestor_pid(crate::agent::AgentId::Claude).map(|p| p.to_string()).unwrap_or_else(|| "(not under a Claude session — liveness reaping relies on this)".into()));
     println!("frontmost now:    {}", focus::frontmost_bundle_id().unwrap_or_else(|| "(unknown)".into()));
@@ -372,9 +370,10 @@ pub fn run_doctor() -> Result<()> {
     // A named sound without a backing file makes macOS play its default
     // sound instead — the classic "why is my sound setting ignored".
     for (which, name) in [("stop", cfg.sounds.stop.as_str()), ("attention", cfg.sounds.attention.as_str())] {
-        if !name.is_empty() && crate::bar::sound_preview_path(name).is_none() {
+        if !name.is_empty() && name != notify::BARK_SOUND_NAME && crate::platform::sound::preview_path(name).is_none() {
             println!(
-                "                  warning: {which} sound \"{name}\" not found in ~/Library/Sounds or /System/Library/Sounds — macOS will play the default sound"
+                "                  warning: {which} sound \"{name}\" {}",
+                crate::platform::sound::MISSING_NOTE
             );
         }
     }

@@ -3,7 +3,7 @@ use tachi_noti::agent::{self, AgentId};
 use tachi_noti::{Scope, hook, settings};
 
 #[derive(Parser)]
-#[command(name = "tachi-noti", version, about = "Tachi Noti — native macOS notifications for Claude Code hooks, delivered by Tachi the butler collie")]
+#[command(name = "tachi-noti", version, about = "Tachi Noti — native macOS and Windows notifications for Claude Code hooks, delivered by Tachi the butler collie")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -53,6 +53,13 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 20)]
         lines: usize,
     },
+    /// Register the OS-level app identity notifications need (Windows; `install` does this too)
+    Register,
+    /// Remove the OS-level app identity created by `register` / `install`
+    Unregister,
+    /// Handle a notification click (Windows URL protocol target); never fails
+    #[command(hide = true)]
+    Activate { uri: String },
     /// Fire a sample notification to verify setup
     Test,
     /// Print diagnostic information
@@ -80,8 +87,14 @@ fn main() {
             });
             std::process::exit(0);
         }
-        Cmd::Install { agent, scope } => exit_on_err(install(agent, scope)),
+        Cmd::Install { agent, scope } => exit_on_err(install(agent, scope).and_then(|()| register())),
         Cmd::Uninstall { agent, scope } => exit_on_err(uninstall(agent, scope)),
+        Cmd::Register => exit_on_err(register()),
+        Cmd::Unregister => exit_on_err(unregister()),
+        Cmd::Activate { uri } => {
+            let _ = std::panic::catch_unwind(|| tachi_noti::platform::register::handle_activation(&uri));
+            std::process::exit(0);
+        }
         Cmd::Statusline { chain } => {
             std::process::exit(tachi_noti::usage::run_statusline(chain.as_deref()));
         }
@@ -116,6 +129,24 @@ fn uninstall(agent: AgentId, scope: Scope) -> CmdResult {
         AgentId::Codex => agent::codex::uninstall(),
         AgentId::Antigravity => agent::antigravity::uninstall(),
     }
+}
+
+fn register() -> CmdResult {
+    for line in tachi_noti::platform::register::install()? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn unregister() -> CmdResult {
+    let lines = tachi_noti::platform::register::uninstall()?;
+    if lines.is_empty() {
+        println!("Nothing registered — nothing to do.");
+    }
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn exit_on_err(r: Result<(), Box<dyn std::error::Error>>) {
