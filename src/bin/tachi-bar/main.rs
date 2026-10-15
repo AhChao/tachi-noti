@@ -62,13 +62,30 @@ fn run_os_command(cmd: Cmd) {
 
 #[cfg(windows)]
 fn run_os_command(cmd: Cmd) {
+    // GUI subsystem: no console of our own, so print into the launching terminal.
+    windows_tray::attach_parent_console();
     match cmd {
-        Cmd::InstallAgent => windows_tray::install_autostart(),
-        Cmd::UninstallAgent => windows_tray::uninstall_autostart(),
-        Cmd::InstallApp | Cmd::UninstallApp => {
-            println!("not needed on Windows \u{2014} `tachi-noti install` creates the Start menu entry")
+        Cmd::InstallAgent => {
+            windows_tray::install_autostart();
+            register_app();
         }
+        Cmd::UninstallAgent => windows_tray::uninstall_autostart(),
+        // The Start menu entry doubles as the toast identity and the click
+        // target; re-registering from here points both at tachi-bar.exe when
+        // `tachi-noti install` ran before tachi-bar was built.
+        Cmd::InstallApp => register_app(),
+        Cmd::UninstallApp => println!(
+            "the Start menu entry is also the notification identity \u{2014} `tachi-noti unregister` removes both"
+        ),
         Cmd::Activate { .. } => unreachable!("handled in main"),
+    }
+}
+
+#[cfg(windows)]
+fn register_app() {
+    match tachi_noti::platform::register::install() {
+        Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+        Err(e) => eprintln!("error: {e}"),
     }
 }
 
