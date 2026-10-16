@@ -36,7 +36,7 @@ To see the same numbers inside Claude Code as well, chain `contrib/statusline/co
 No daemon, no IPC: the hooks write tiny per-session state files under `~/Library/Application Support/tachi-noti/state/` (`%APPDATA%\tachi-noti\state\` on Windows), and the bar re-reads them every 2 seconds.
 
 ```sh
-cargo install --path . --features bar   # installs tachi-noti + tachi-bar
+cargo install --git https://github.com/AhChao/tachi-noti --locked --features bar   # tachi-noti + tachi-bar
 tachi-bar                               # run it
 tachi-bar install-agent                 # optional: start at login (launchd)
 tachi-bar install-app                   # optional: "Tachi Bar.app" in ~/Applications, launchable from Spotlight
@@ -45,8 +45,10 @@ tachi-bar install-app                   # optional: "Tachi Bar.app" in ~/Applica
 
 ## Install
 
+Supported: macOS and Windows 10/11 (for Windows, follow [the Windows steps](#windows) instead). Linux is not supported. You need a Rust toolchain ([rustup](https://rustup.rs)); nothing else has to be cloned, `cargo` fetches the source itself. Installing from a clone works the same with `--path .` in place of `--git <url>`.
+
 ```sh
-cargo install --path .
+cargo install --git https://github.com/AhChao/tachi-noti --locked
 tachi-noti install       # adds hooks to ~/.claude/settings.json (backs up first)
 tachi-noti test          # fire a sample notification
 ```
@@ -64,15 +66,44 @@ tachi-noti auto-detects the best available backend:
 
 Windows 10/11 is supported natively: the same hooks, the same state files, WinRT toasts instead of macOS notifications, and a system-tray icon instead of the menu bar item. Toasts stay in the Notification Center (Win+N), so anything you missed is still there; the tray menu's "Recent notifications" shows the last five as well.
 
-Requirements: a Rust toolchain with the MSVC target (`rustup default stable-x86_64-pc-windows-msvc`, plus the Visual Studio Build Tools' "Desktop development with C++" workload for the linker) and Claude Code's own Git for Windows. Claude Code runs hook and statusLine commands through Git Bash, so the installed command paths use forward slashes (`C:/Users/you/.cargo/bin/tachi-noti.exe hook`).
+### Windows install, step by step
 
-```powershell
-cargo install --path . --features bar   # tachi-noti.exe + tachi-bar.exe into %USERPROFILE%\.cargo\bin
-tachi-noti install                      # hooks + statusLine, and registers the "Tachi" app identity
-tachi-bar install-agent                 # start the tray at login (HKCU Run) and point the Start menu entry at tachi-bar
-tachi-bar                               # run the tray now (or launch "Tachi" from the Start menu)
-tachi-noti test                         # fire a sample toast
-```
+Run these in **PowerShell** (not Git Bash: Git Bash waits for `tachi-bar` to exit, and the tray never exits). Every step is per user and needs no admin rights, except installing the C++ build tools in step 1, which shows one Windows permission prompt.
+
+1. **Build tools** (skip what you already have; `rustc --version` and `cargo --version` tell you):
+
+   ```powershell
+   winget install -e --id Rustlang.Rustup
+   winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+   ```
+
+   Then open a **new** PowerShell window so `cargo` is on the PATH. rustup's default toolchain on Windows is already the MSVC one (`stable-x86_64-pc-windows-msvc`), which is what the build needs; the C++ build tools supply its linker.
+
+2. **Build and install** both programs into `%USERPROFILE%\.cargo\bin` (takes a few minutes the first time):
+
+   ```powershell
+   cargo install --git https://github.com/AhChao/tachi-noti --locked --features bar
+   ```
+
+3. **Wire it up.** `install` records where the programs live, so run it after step 2 and again if you ever move them:
+
+   ```powershell
+   tachi-noti install          # Claude Code hooks + statusLine, and the "Tachi" notification identity
+   tachi-bar install-agent     # start the tray at login, and make notification clicks open through the tray
+   Start-Process tachi-bar     # start the tray now (later it starts by itself at login)
+   tachi-noti test             # a sample notification from Tachi should appear
+   tachi-noti doctor           # checks the setup, see below
+   ```
+
+   In the `doctor` output, the three `registration:` lines should read `registered`, `present`, and a URL protocol pointing at `tachi-bar.exe activate`. If any says `not registered` or `missing`, run `tachi-noti register`.
+
+4. **Restart Claude Code** (close every session and start a new one) so it loads the hooks.
+
+Claude Code itself must be installed with its Git for Windows, as its own installer requires. Claude Code runs hook and statusLine commands through Git Bash, so the installed command paths use forward slashes (`C:/Users/you/.cargo/bin/tachi-noti.exe hook`).
+
+To remove it again: `tachi-bar uninstall-agent`, `tachi-noti uninstall`, `tachi-noti unregister`, then `cargo uninstall tachi-noti`.
+
+### What install changes on Windows
 
 What `install` registers, all per user under HKCU (no admin, nothing outside your profile):
 
@@ -92,7 +123,7 @@ Differences from macOS, by design of the platform:
 
 ## Configuration
 
-Optional, at `~/.config/tachi-noti/config.toml`. Defaults shown:
+Optional, at `~/.config/tachi-noti/config.toml` (Windows: `%USERPROFILE%\.config\tachi-noti\config.toml`). Defaults shown are the macOS ones; on Windows the sound names are the `.wav` names from `%WINDIR%\Media` described [above](#windows), and the tray's sound pickers write them for you.
 
 ```toml
 focus_suppression = true   # skip notification when the session's app is frontmost
@@ -145,4 +176,4 @@ Implementation notes:
 - Notification text is passed strictly via argv (AppleScript `on run argv` / discrete `Command` args) — message content can never be injected into a shell or script.
 - Git branch is read directly from `.git/HEAD` (handles worktrees and detached HEAD) — no `git` subprocess.
 - Tachi's portrait is embedded with `include_bytes!` and materialized to `~/Library/Caches/tachi-noti/tachi-head.png` on first use; it's passed as both `-appIcon` and `-contentImage` since recent macOS ignores the former.
-- Debugging: `TACHI_NOTI_DEBUG=1` logs hook errors to `~/Library/Caches/tachi-noti/debug.log`; otherwise the hook path is silent by design.
+- Debugging: `TACHI_NOTI_DEBUG=1` logs hook errors to `~/Library/Caches/tachi-noti/debug.log` (Windows: `%LOCALAPPDATA%\tachi-noti\debug.log`); otherwise the hook path is silent by design.
