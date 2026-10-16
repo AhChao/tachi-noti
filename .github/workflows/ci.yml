@@ -21,6 +21,28 @@ jobs:
         run: cargo test --features bar
       - name: Release build
         run: cargo build --release --features bar
+      # The README's Windows steps 2-3 as written (minus the tray and the
+      # toast, which need a desktop session), then the uninstall line.
+      # Output is captured so PowerShell waits for the GUI-subsystem tachi-bar.
+      - name: Install smoke test (README steps)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo install --path . --locked --features bar
+          $out = tachi-noti install 2>&1; $out
+          $out = tachi-bar install-agent 2>&1; $out
+          $doctor = (tachi-noti doctor 2>&1) -join "`n"; $doctor
+          foreach ($want in @('AUMID TachiNoti.Tachi registered', '(present)', 'tachi-bar.exe" activate')) {
+            if (-not $doctor.Contains($want)) { throw "doctor output lacks: $want" }
+          }
+          $settings = Get-Content "$env:USERPROFILE\.claude\settings.json" -Raw
+          if (-not $settings.Contains('/.cargo/bin/tachi-noti.exe hook')) { throw 'hooks not installed with a forward-slash path' }
+          $out = tachi-bar uninstall-agent 2>&1; $out
+          tachi-noti uninstall
+          tachi-noti unregister
+          $doctor = (tachi-noti doctor 2>&1) -join "`n"
+          if (-not $doctor.Contains('not registered')) { throw 'unregister left the AUMID behind' }
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
