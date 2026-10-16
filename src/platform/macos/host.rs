@@ -51,6 +51,10 @@ pub fn same_host(a: &str, b: &str) -> bool {
     a == b
 }
 
+/// A host id `window_per_folder` accepts, for OS-neutral tests.
+#[cfg(test)]
+pub const SAMPLE_WINDOW_PER_FOLDER_HOST: &str = "com.microsoft.VSCode";
+
 const VSCODE_FAMILY: &[&str] = &[
     "com.microsoft.VSCode",
     "com.microsoft.VSCodeInsiders",

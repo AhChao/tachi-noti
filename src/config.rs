@@ -143,8 +143,8 @@ mod tests {
     #[test]
     fn defaults() {
         let c = Config::default();
-        assert_eq!(c.sounds.stop, "Glass");
-        assert_eq!(c.sounds.attention, "Basso");
+        assert_eq!(c.sounds.stop, crate::platform::sound::DEFAULT_STOP);
+        assert_eq!(c.sounds.attention, crate::platform::sound::DEFAULT_ATTENTION);
         assert!(c.focus_suppression);
         assert_eq!(c.min_duration_secs, 0);
         assert!(c.backend.is_none());
@@ -156,7 +156,7 @@ mod tests {
         let c: Config = toml::from_str("min_duration_secs = 15\n[sounds]\nstop = \"Ping\"\n").unwrap();
         assert_eq!(c.min_duration_secs, 15);
         assert_eq!(c.sounds.stop, "Ping");
-        assert_eq!(c.sounds.attention, "Basso");
+        assert_eq!(c.sounds.attention, crate::platform::sound::DEFAULT_ATTENTION);
         assert!(c.focus_suppression);
     }
 

@@ -43,6 +43,10 @@ const WINDOW_PER_FOLDER_EXES: &[&str] = &[
     "antigravity.exe",
 ];
 
+/// A host id `window_per_folder` accepts, for OS-neutral tests.
+#[cfg(test)]
+pub const SAMPLE_WINDOW_PER_FOLDER_HOST: &str = r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code\Code.exe";
+
 /// A visible, unowned top-level window.
 #[derive(Clone, Copy)]
 struct TopWindow {

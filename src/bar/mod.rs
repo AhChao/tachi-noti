@@ -220,7 +220,7 @@ mod tests {
             repo_name: platform::path_basename(root).into(),
             repo_root: Some(root.into()),
             branch: Some("main".into()),
-            bundle_id: Some("com.microsoft.VSCode".into()),
+            bundle_id: Some(platform::host::SAMPLE_WINDOW_PER_FOLDER_HOST.into()),
             cwd: root.into(),
             status,
             status_since: last_event_at.saturating_sub(60),

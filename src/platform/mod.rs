@@ -29,6 +29,8 @@
 //!   where opening the project folder focuses the exact window
 //! - `host::window_per_folder_hook_hint() -> bool` — extra hook-process-only
 //!   evidence (macOS: TERM_PROGRAM=vscode catches unlisted forks)
+//! - `host::SAMPLE_WINDOW_PER_FOLDER_HOST` (tests only) — a host id the
+//!   platform treats as VS Code-family, so shared tests need no `cfg`
 //! - `host::focus_host(host_id: &str, open_path: Option<&str>, window: Option<&str>)`
 //!   — bring the session's window forward (menu click, notification click);
 //!   a still-valid window token wins over app/folder-level focus

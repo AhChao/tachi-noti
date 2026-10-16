@@ -310,16 +310,14 @@ mod tests {
         );
     }
 
-    // VS Code bundle ids are only recognised by the macOS host module.
-    #[cfg(target_os = "macos")]
     #[test]
     fn focus_action_carries_open_path() {
-        let states = vec![session("aaa111", "/r/alpha", Status::Idle, 100, Some("com.microsoft.VSCode"))];
+        let states = vec![session("aaa111", "/r/alpha", Status::Idle, 100, Some(crate::platform::host::SAMPLE_WINDOW_PER_FOLDER_HOST))];
         let m = build_with(states, 200, &env(false), &[], None, &sounds());
         let Item::Session(s) = &m.items[1] else { panic!() };
         assert_eq!(
             s.action,
-            Some(Action::Focus { host_id: "com.microsoft.VSCode".into(), open_path: Some("/r/alpha".into()), window: None })
+            Some(Action::Focus { host_id: crate::platform::host::SAMPLE_WINDOW_PER_FOLDER_HOST.into(), open_path: Some("/r/alpha".into()), window: None })
         );
     }
 
