@@ -43,6 +43,15 @@ jobs:
           tachi-noti unregister
           $doctor = (tachi-noti doctor 2>&1) -join "`n"
           if (-not $doctor.Contains('not registered')) { throw 'unregister left the AUMID behind' }
+      # The README's status line chain as written, on both OSes (Git Bash on
+      # Windows): the capture stage must hand the payload to the script.
+      - name: Status line script smoke test
+        shell: bash
+        run: |
+          payload='{"model":{"display_name":"Opus 5.5"},"context_window":{"used_percentage":12}}'
+          out=$(printf '%s' "$payload" | target/release/tachi-noti statusline --chain 'bash contrib/statusline/context-usage.sh')
+          printf '%s\n' "$out"
+          case "$out" in *"Opus 5.5"*"ctx 12%"*) ;; *) echo "unexpected status line: $out"; exit 1 ;; esac
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
