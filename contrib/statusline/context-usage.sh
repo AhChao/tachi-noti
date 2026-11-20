@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claude Code status line: context window fill plus 5-hour / 7-day plan usage.
+# Claude Code status line: current model, context window fill, and 5-hour / 7-day plan usage.
 # Chained after tachi-noti in ~/.claude/settings.json (symlink ~/.claude/statusline/context-usage.sh here):
 #   "command": "tachi-noti statusline --chain ~/.claude/statusline/context-usage.sh"
 # Reads only the JSON Claude Code passes on stdin (no API calls); one jq call per refresh.
@@ -19,7 +19,8 @@ jq -r '
       | if $m < 0 then "" elif $m >= 60 then " \($m / 60 | floor)h\($m % 60)m" else " \($m)m" end
     end;
 
-  (.context_window.used_percentage | pct) as $ctx
+  (.model.display_name // .model.id // null) as $model
+  | (.context_window.used_percentage | pct) as $ctx
   | (.context_window.context_window_size // null) as $size
   | ((.context_window.current_usage // null)
       | if . == null then null
@@ -27,6 +28,7 @@ jq -r '
   | (.rate_limits.five_hour.used_percentage | pct) as $h5
   | (.rate_limits.seven_day.used_percentage | pct) as $d7
   | [
+      ( if $model == null then empty else "\u001b[36m\($model)\u001b[0m" end ),
       ( colour($ctx) + "ctx "
         + (if $ctx == null then "--" else "\($ctx)%" end)
         + (if $used != null and $size != null then " (\($used | human)/\($size | human))" else "" end)
