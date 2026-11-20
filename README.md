@@ -31,7 +31,7 @@ His portrait rides along inside the binary, so every notification arrives with h
 - A **Usage section** with your official Claude Code rate-limit numbers — 5-hour and weekly utilization with reset countdowns — plus a red ⚠ in the menu bar title when either window crosses `usage_alert_pct` (default 80, 0 to disable). The data comes from Claude Code's own statusLine payload: `tachi-noti install` puts a tiny capture stage (`tachi-noti statusline --chain '<your original statusline>'`) at the front of your statusLine pipeline — your existing statusline keeps rendering, zero network calls, no OAuth-token shenanigans (Anthropic's ToS bans third-party use of those, and the unofficial endpoint is blocked anyway). Transcript-based estimators were rejected too: their token counts are off by 46–100×. Pro/Max only — API-key accounts get no `rate_limits` payload.
 - A "Recent notifications" submenu (last 5), **two sound pickers** — Completion Sound (Stop) and Attention Sound (permission / question / plan) — listing Tachi's bark, your own `~/Library/Sounds`, every system sound, or silent (plays a preview on selection and persists to config), a Launch-at-Login toggle, a **Restart Tachi Bar** item (fully reloads the launchd agent — bootout + bootstrap — so restarting still works after the binary was replaced by `cargo install`; without the agent it hands over to a fresh copy), and Quit.
 
-To see the same numbers inside Claude Code as well, chain `contrib/statusline/context-usage.sh` after the capture stage: `tachi-noti statusline --chain /path/to/contrib/statusline/context-usage.sh`. It prints one line, `Opus 5.5 · ctx 34% (346k/1M) · 5h 72% 1h29m · 7d 41%`: the current model first (from `model.display_name`), then the usage figures coloured green under 30%, yellow to 60% and red above. It reads only the statusLine payload (one `jq` call, about 14ms) and needs `jq` on the PATH.
+To see the current model and the same numbers inside Claude Code as well, add the optional status line script: see [Model and usage line in Claude Code](#model-and-usage-line-in-claude-code).
 
 No daemon, no IPC: the hooks write tiny per-session state files under `~/Library/Application Support/tachi-noti/state/` (`%APPDATA%\tachi-noti\state\` on Windows), and the bar re-reads them every 2 seconds.
 
@@ -120,6 +120,73 @@ Differences from macOS, by design of the platform:
 - **Sounds** are `.wav` names from `%WINDIR%\Media` (defaults: `Windows Notify System Generic` for completion, `Windows Exclamation` for attention) or `TachiBark`. Toasts are shown silent and tachi-noti plays the file itself, because Windows does not let an unpackaged app give a toast a custom sound; an unknown name plays Windows' default notification sound.
 - **Tray**: Tachi's face with a dot for the most urgent session (yellow waiting, green running, gray idle) and a red dot for the usage alert; hover for the counts. Windows menus cannot update while open or show per-row tooltips, so row labels refresh when the menu is reopened and permission rows carry their command hint inline.
 - **Bringing a window forward**: Windows only lets the app the user last interacted with take the foreground. A toast or tray click qualifies; if Windows still refuses, the target window flashes in the taskbar instead.
+
+## Model and usage line in Claude Code
+
+Optional. `contrib/statusline/context-usage.sh` prints one line at the bottom of Claude Code:
+
+```
+Opus 5.5 · ctx 34% (346k/1M) · 5h 72% 1h29m · 7d 41%
+```
+
+The current model comes first (from `model.display_name`), then the context window fill and the 5-hour / 7-day plan usage, coloured green under 30%, yellow to 60% and red above. It reads only the statusLine payload Claude Code already passes (one `jq` call, about 14ms, no network). `cargo install` does not put this script on your machine, so it takes three steps on top of the install above.
+
+1. **Get the script and `jq`.**
+
+   macOS:
+
+   ```sh
+   brew install jq
+   mkdir -p ~/.claude/statusline
+   curl -fsSL https://raw.githubusercontent.com/AhChao/tachi-noti/master/contrib/statusline/context-usage.sh -o ~/.claude/statusline/context-usage.sh
+   ```
+
+   Windows (PowerShell):
+
+   ```powershell
+   winget install -e --id jqlang.jq
+   New-Item -ItemType Directory -Force "$HOME\.claude\statusline" | Out-Null
+   Invoke-WebRequest https://raw.githubusercontent.com/AhChao/tachi-noti/master/contrib/statusline/context-usage.sh -OutFile "$HOME\.claude\statusline\context-usage.sh"
+   ```
+
+   Working from a clone instead, you can symlink `~/.claude/statusline/context-usage.sh` to the file in the clone, so it follows `git pull`.
+
+2. **Chain it after the capture stage.** In `~/.claude/settings.json` (Windows: `%USERPROFILE%\.claude\settings.json`), `tachi-noti install` has set `statusLine.command` to `<path>/tachi-noti statusline`. Append the chain to it, keeping the path `install` wrote:
+
+   ```json
+   "statusLine": {
+     "type": "command",
+     "command": "/Users/you/.cargo/bin/tachi-noti statusline --chain 'bash ~/.claude/statusline/context-usage.sh'"
+   }
+   ```
+
+   On Windows the path reads `C:/Users/you/.cargo/bin/tachi-noti.exe`; the chained part is the same, because Claude Code runs it through Git Bash on both platforms. If the command already has a `--chain '...'` (your own status line, kept by `install`), it renders instead of this one: replace that part to switch.
+
+3. **Restart Claude Code.** On Windows open it from a new terminal, so the `jq` that winget just put on the PATH is visible to it.
+
+If the line shows only `ctx --`, `jq` is missing from the PATH Claude Code sees, or the session has not reported usage yet (right after starting).
+
+## Updating
+
+Run the same `cargo install` line again; cargo rebuilds when the repository has new commits. `tachi-noti install` does not need to run again unless you moved the programs. Restart Claude Code sessions to pick up hook changes.
+
+macOS (drop `--features bar` if you don't use Tachi Bar):
+
+```sh
+cargo install --git https://github.com/AhChao/tachi-noti --locked --features bar
+```
+
+Then pick **Restart Tachi Bar** in the menu bar item so the bar runs the new binary.
+
+Windows (PowerShell): stop the tray first, because Windows does not let a running `tachi-bar.exe` be replaced.
+
+```powershell
+Stop-Process -Name tachi-bar -ErrorAction SilentlyContinue
+cargo install --git https://github.com/AhChao/tachi-noti --locked --features bar
+Start-Process tachi-bar
+```
+
+The optional status line script is not part of the binary. Downloaded copies update by running the download command in step 1 [above](#model-and-usage-line-in-claude-code) again; a symlink into a clone updates with `git pull`.
 
 ## Configuration
 
