@@ -52,6 +52,14 @@ jobs:
           out=$(printf '%s' "$payload" | target/release/tachi-noti statusline --chain 'bash contrib/statusline/context-usage.sh')
           printf '%s\n' "$out"
           case "$out" in *"Opus 5.5"*"ctx 12%"*) ;; *) echo "unexpected status line: $out"; exit 1 ;; esac
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/cc-config"
+          mkdir -p "$CLAUDE_CONFIG_DIR/sessions"
+          printf '%s' '{"sessionId":"s1","name":"my-repo-4d","nameSource":"derived","updatedAt":1}' > "$CLAUDE_CONFIG_DIR/sessions/1.json"
+          printf '%s' '{"sessionId":"s2","name":"reviewer","nameSource":"user","updatedAt":1}' > "$CLAUDE_CONFIG_DIR/sessions/2.json"
+          out=$(printf '%s' '{"session_id":"s1","model":{"display_name":"Opus 5.5"}}' | bash contrib/statusline/context-usage.sh)
+          case "$out" in *"4d"*"Opus 5.5"*) ;; *) echo "missing short code: $out"; exit 1 ;; esac
+          out=$(printf '%s' '{"session_id":"s2","model":{"display_name":"Opus 5.5"}}' | bash contrib/statusline/context-usage.sh)
+          case "$out" in *"reviewer"*"Opus 5.5"*) ;; *) echo "missing session name: $out"; exit 1 ;; esac
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:

@@ -126,10 +126,10 @@ Differences from macOS, by design of the platform:
 Optional. `contrib/statusline/context-usage.sh` prints one line at the bottom of Claude Code:
 
 ```
-Opus 5.5 · ctx 34% (346k/1M) · 5h 72% 1h29m · 7d 41%
+61 · Opus 5.5 · ctx 34% (346k/1M) · 5h 72% 1h29m · 7d 41%
 ```
 
-The current model comes first (from `model.display_name`), then the context window fill and the 5-hour / 7-day plan usage, coloured green under 30%, yellow to 60% and red above. It reads only the statusLine payload Claude Code already passes (one `jq` call, about 14ms, no network). `cargo install` does not put this script on your machine, so it takes three steps on top of the install above.
+The session's short code comes first: the suffix of the name Claude Code gives the session (`kickstart-one-61` → `61`), the same name other sessions use to message it, so you can tell one agent which other session to talk to. It is read from Claude Code's session registry (`~/.claude/sessions/*.json`, or under `CLAUDE_CONFIG_DIR`); a session you renamed shows its whole name, and nothing is shown if the registry has no entry. The current model follows (from `model.display_name`), then the context window fill and the 5-hour / 7-day plan usage, coloured green under 30%, yellow to 60% and red above. It reads only the statusLine payload Claude Code already passes and that local registry (one `jq` call, about 14ms, no network). `cargo install` does not put this script on your machine, so it takes three steps on top of the install above.
 
 1. **Get the script and `jq`.**
 
