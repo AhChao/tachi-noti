@@ -11,7 +11,21 @@
 
 sessions_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
 
-jq -r --slurpfile reg <(cat "$sessions_dir"/*.json 2>/dev/null) '
+# Find this session's registry entry without process substitution: Git Bash on Windows
+# cannot hand /dev/fd paths to the native jq.exe. The entry goes in as a string and is
+# parsed with try, so a registry file caught mid-write never takes the whole line down.
+input=$(cat)
+sid=""
+if [[ $input =~ \"session_id\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+  sid=${BASH_REMATCH[1]}
+fi
+reg=""
+if [ -n "$sid" ]; then
+  f=$(grep -l -F "$sid" "$sessions_dir"/*.json 2>/dev/null | head -n 1)
+  [ -n "$f" ] && reg=$(cat "$f" 2>/dev/null)
+fi
+
+printf '%s' "$input" | jq -r --arg reg "$reg" '
   def pct: if . == null then null else (. | floor) end;
   def colour(p): if p == null then "\u001b[2m"
                  elif p >= 60 then "\u001b[31m"
@@ -26,8 +40,8 @@ jq -r --slurpfile reg <(cat "$sessions_dir"/*.json 2>/dev/null) '
     end;
 
   .session_id as $sid
-  | ([$reg[] | select(type == "object" and .sessionId == $sid and $sid != null)]
-      | max_by(.updatedAt // 0) // null) as $entry
+  | ($reg | if . == "" then null else (try fromjson catch null) end
+      | if type == "object" and $sid != null and .sessionId == $sid then . else null end) as $entry
   | ( if $entry == null or ($entry.name // "") == "" then null
       elif $entry.nameSource == "derived" and ($entry.name | test("-[0-9a-f]+$"))
         then ($entry.name | capture("-(?<c>[0-9a-f]+)$").c)
